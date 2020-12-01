@@ -3,19 +3,19 @@
 Various positional encodings for the transformer.
 """
 import math
-import torch
-from torch import nn
+import tensorflow as tf
+import tensorflow.keras.backend as K
+from tensorflow.keras import layers
 
-from util.misc import NestedTensor
 
-
-class PositionEmbeddingSine(nn.Module):
+class PositionEmbeddingSine(layers.Layer):
     """
     This is a more standard version of the position embedding, very similar to the one
     used by the Attention is all you need paper, generalized to work on images.
     """
     def __init__(self, num_pos_feats=64, temperature=10000, normalize=False, scale=None):
         super().__init__()
+        self.chw = K.image_data_format() == 'channels_first'
         self.num_pos_feats = num_pos_feats
         self.temperature = temperature
         self.normalize = normalize
@@ -25,54 +25,71 @@ class PositionEmbeddingSine(nn.Module):
             scale = 2 * math.pi
         self.scale = scale
 
-    def forward(self, tensor_list: NestedTensor):
-        x = tensor_list.tensors
-        mask = tensor_list.mask
-        assert mask is not None
-        not_mask = ~mask
-        y_embed = not_mask.cumsum(1, dtype=torch.float32)
-        x_embed = not_mask.cumsum(2, dtype=torch.float32)
+    def get_config(self):
+        child_config = {
+            'num_pos_feats': self.num_pos_feats,
+            'temperature': self.temperature,
+            'normalize': self.normalize,
+            'scale': self.scale
+        }
+        return super().get_config() + child_config
+
+    def build(self, input_shape):
+        self.height, self.width = input_shape[-2:] if self.chw else input_shape[-3:-1]
+
+    def call(self):
+        y_range = tf.range(height, dtype=tf.float32)
+        x_range = tf.range(width, dtype=tf.float32)
+        y_embed, x_embed = tf.expand_dims(tf.meshgrid(y_range, x_range), 0)
         if self.normalize:
             eps = 1e-6
             y_embed = y_embed / (y_embed[:, -1:, :] + eps) * self.scale
             x_embed = x_embed / (x_embed[:, :, -1:] + eps) * self.scale
 
-        dim_t = torch.arange(self.num_pos_feats, dtype=torch.float32, device=x.device)
+        dim_t = tf.range(self.num_pos_feats, dtype=tf.float32)
         dim_t = self.temperature ** (2 * (dim_t // 2) / self.num_pos_feats)
 
-        pos_x = x_embed[:, :, :, None] / dim_t
-        pos_y = y_embed[:, :, :, None] / dim_t
-        pos_x = torch.stack((pos_x[:, :, :, 0::2].sin(), pos_x[:, :, :, 1::2].cos()), dim=4).flatten(3)
-        pos_y = torch.stack((pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4).flatten(3)
-        pos = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
+        pos_x = tf.expand_dims(x_embed, -1) / dim_t
+        pos_y = tf.expand_dims(y_embed, -1) / dim_t
+        pos_x = tf.reshape(tf.stack([tf.sin(pos_x[:, :, :, 0::2]), tf.cos(pos_x[:, :, :, 1::2])], 4), pos_x.shape[:3] + [-1])
+        pos_y = tf.reshape(tf.stack([tf.sin(pos_y[:, :, :, 0::2]), tf.cos(pos_y[:, :, :, 1::2])], 4), pos_y.shape[:3] + [-1])
+        pos = tf.concatenate([pos_y, pos_x], 3)
+        if self.chw:
+            pos = tf.transpose(pos, [0, 3, 1, 2])
         return pos
 
 
-class PositionEmbeddingLearned(nn.Module):
+class PositionEmbeddingLearned(layers.Layer):
     """
     Absolute pos embedding, learned.
     """
     def __init__(self, num_pos_feats=256):
+        self.chw = K.image_data_format() == 'channels_first'
         super().__init__()
-        self.row_embed = nn.Embedding(50, num_pos_feats)
-        self.col_embed = nn.Embedding(50, num_pos_feats)
-        self.reset_parameters()
 
-    def reset_parameters(self):
-        nn.init.uniform_(self.row_embed.weight)
-        nn.init.uniform_(self.col_embed.weight)
+    def get_config(self):
+        child_config = {'num_pos_feats': self.num_pos_feats}
+        return super().get_config() + child_config
 
-    def forward(self, tensor_list: NestedTensor):
-        x = tensor_list.tensors
-        h, w = x.shape[-2:]
-        i = torch.arange(w, device=x.device)
-        j = torch.arange(h, device=x.device)
-        x_emb = self.col_embed(i)
-        y_emb = self.row_embed(j)
-        pos = torch.cat([
-            x_emb.unsqueeze(0).repeat(h, 1, 1),
-            y_emb.unsqueeze(1).repeat(1, w, 1),
-        ], dim=-1).permute(2, 0, 1).unsqueeze(0).repeat(x.shape[0], 1, 1, 1)
+    def build(self, input_shape):
+        self.height, self.width = input_shape[-2:] if self.chw else input_shape[-3:-1]
+        super(PositionEmbeddingLearned, self).build(input_shape)
+        self.row_embed = self.add_weight(
+            name='row_embed', shape=(self.height, self.num_pos_feats),
+            initializer='glorot_uniform', trainable=True)
+        self.col_embed = self.add_weight(
+            name='col_embed', shape=(self.width, self.num_pos_feats),
+            initializer='glorot_uniform', trainable=True)
+
+    def call(self):
+        i, j = tf.range(self.width), tf.range(self.height)
+        pos = tf.concatenate([
+            tf.stack([self.col_embed] * self.height, 0),
+            tf.stack([self.row_embed] * self.width, 1),
+        ], dim=-1)
+        if self.chw:
+            pos = tf.permute(pos, [2, 0, 1])
+        pos = tf.expand_dims(pos, 0)
         return pos
 
 
