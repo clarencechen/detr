@@ -2,65 +2,68 @@
 """
 Utilities for bounding box manipulation and GIoU.
 """
-import torch
-from torchvision.ops.boxes import box_area
+import tensorflow as tf
 
+@tf.function
+def box_area_xyxy(x):
+    return (x[..., 2] - x[..., 0]) * (x[..., 3] - x[..., 1])
 
+@tf.function
 def box_cxcywh_to_xyxy(x):
-    x_c, y_c, w, h = x.unbind(-1)
+    x_c, y_c, w, h = x[..., 0], x[..., 1], x[..., 2], x[..., 3]
     b = [(x_c - 0.5 * w), (y_c - 0.5 * h),
          (x_c + 0.5 * w), (y_c + 0.5 * h)]
-    return torch.stack(b, dim=-1)
+    return tf.stack(b, -1)
 
-
+@tf.function
 def box_xyxy_to_cxcywh(x):
-    x0, y0, x1, y1 = x.unbind(-1)
+    x0, y0, x1, y1 = x[..., 0], x[..., 1], x[..., 2], x[..., 3]
     b = [(x0 + x1) / 2, (y0 + y1) / 2,
          (x1 - x0), (y1 - y0)]
-    return torch.stack(b, dim=-1)
-
+    return tf.stack(b, -1)
 
 # modified from torchvision to also return the union
-def box_iou(boxes1, boxes2):
-    area1 = box_area(boxes1)
-    area2 = box_area(boxes2)
+@tf.function
+def box_iou(x1, x2):
+    a1, a2 = box_area_xyxy(x1), box_area_xyxy(x2)
 
-    lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])  # [N,M,2]
-    rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])  # [N,M,2]
+    lt = tf.maximum(tf.expand_dims(x1[:, :2], -2), x2[:, :2])  # [N,M,2]
+    rb = tf.minimum(tf.expand_dims(x1[:, 2:], -2), x2[:, 2:])  # [N,M,2]
 
-    wh = (rb - lt).clamp(min=0)  # [N,M,2]
+    wh = tf.maximum(rb - lt, 0)  # [N,M,2]
     inter = wh[:, :, 0] * wh[:, :, 1]  # [N,M]
 
-    union = area1[:, None] + area2 - inter
+    union = tf.expand_dims(a1, -1) + a2 - inter
 
     iou = inter / union
     return iou, union
 
-
-def generalized_box_iou(boxes1, boxes2):
+@tf.function
+def generalized_box_iou(x1, x2):
     """
     Generalized IoU from https://giou.stanford.edu/
 
     The boxes should be in [x0, y0, x1, y1] format
 
-    Returns a [N, M] pairwise matrix, where N = len(boxes1)
-    and M = len(boxes2)
+    Returns a [N, M] pairwise matrix, where N = len(x1)
+    and M = len(x2)
     """
     # degenerate boxes gives inf / nan results
     # so do an early check
-    assert (boxes1[:, 2:] >= boxes1[:, :2]).all()
-    assert (boxes2[:, 2:] >= boxes2[:, :2]).all()
-    iou, union = box_iou(boxes1, boxes2)
+    x1_ok = tf.debugging.assert_greater_equal(x1[:, 2:], x1[:, :2])
+    x2_ok = tf.debugging.assert_greater_equal(x2[:, 2:], x2[:, :2])
+    with tf.Graph.control_dependencies([x1_ok, x2_ok]):
+        iou, union = box_iou(x1, x2)
 
-    lt = torch.min(boxes1[:, None, :2], boxes2[:, :2])
-    rb = torch.max(boxes1[:, None, 2:], boxes2[:, 2:])
+        lt = tf.minimum(tf.expand_dims(x1[:, :2], -2), x2[:, :2])
+        rb = tf.maximum(tf.expand_dims(x1[:, 2:], -2), x2[:, 2:])
 
-    wh = (rb - lt).clamp(min=0)  # [N,M,2]
-    area = wh[:, :, 0] * wh[:, :, 1]
+        wh = tf.maximum(rb - lt, 0)  # [N,M,2]
+        hull = wh[:, :, 0] * wh[:, :, 1]
 
-    return iou - (area - union) / area
+        return iou - (hull - union) / hull
 
-
+@tf.function
 def masks_to_boxes(masks):
     """Compute the bounding boxes around the provided masks
 
@@ -68,21 +71,21 @@ def masks_to_boxes(masks):
 
     Returns a [N, 4] tensors, with the boxes in xyxy format
     """
-    if masks.numel() == 0:
-        return torch.zeros((0, 4), device=masks.device)
+    if tf.size(masks) == 0:
+        return tf.zeros((0, 4), dtype=tf.float)
 
     h, w = masks.shape[-2:]
 
-    y = torch.arange(0, h, dtype=torch.float)
-    x = torch.arange(0, w, dtype=torch.float)
-    y, x = torch.meshgrid(y, x)
+    y = tf.range(0, h, dtype=tf.float)
+    x = tf.range(0, w, dtype=tf.float)
+    y, x = tf.meshgrid(y, x)
 
-    x_mask = (masks * x.unsqueeze(0))
-    x_max = x_mask.flatten(1).max(-1)[0]
-    x_min = x_mask.masked_fill(~(masks.bool()), 1e8).flatten(1).min(-1)[0]
+    x_mask = masks * tf.expand_dims(x, 0)
+    x_max = tf.reduce_max(x_mask, [-1, -2])
+    x_min = tf.reduce_min(tf.where(masks, x_mask, 1e8), [-1, -2])
 
-    y_mask = (masks * y.unsqueeze(0))
-    y_max = y_mask.flatten(1).max(-1)[0]
-    y_min = y_mask.masked_fill(~(masks.bool()), 1e8).flatten(1).min(-1)[0]
+    y_mask = masks * tf.expand_dims(y, 0)
+    y_max = tf.reduce_max(y_max, [-1, -2])
+    y_min = tf.reduce_min(tf.where(masks, y_mask, 1e8), [-1, -2])
 
-    return torch.stack([x_min, y_min, x_max, y_max], 1)
+    return tf.stack([x_min, y_min, x_max, y_max], 1)
