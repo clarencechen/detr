@@ -1,9 +1,9 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 """
-DETR Transformer class.
+DETR Transformer class based on torch.nn.Transformer but written in TF2/Keras.
     * positional encodings are passed in MHattention
+    * added many customizability options from https://github.com/lucidrains/x-transfomers/.
 """
-import copy
 from typing import Optional, List, Union, Callable
 
 import tensorflow as tf
