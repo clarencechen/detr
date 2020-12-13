@@ -6,6 +6,7 @@ import math
 import tensorflow as tf
 import tensorflow.keras.backend as K
 from tensorflow.keras import layers
+from tensorflow.keras.utils import get_custom_objects
 
 
 class PositionEmbeddingSine(layers.Layer):
@@ -34,7 +35,7 @@ class PositionEmbeddingSine(layers.Layer):
         return super().get_config() + child_config
 
     def build(self, input_shape):
-        self.height, self.width = input_shape[-2:] if self.chw else input_shape[-3:-1]
+        self.height, self.width = input_shape[-2:] if K.image_data_format() == 'channels_first' else input_shape[-3:-1]
 
     def call(self):
         y_range = tf.range(height, dtype=tf.float32)
@@ -71,7 +72,7 @@ class PositionEmbeddingLearned(layers.Layer):
         return super().get_config() + child_config
 
     def build(self, input_shape):
-        self.height, self.width = input_shape[-2:] if self.chw else input_shape[-3:-1]
+        self.height, self.width = input_shape[-2:] if K.image_data_format() == 'channels_first' else input_shape[-3:-1]
         super(PositionEmbeddingLearned, self).build(input_shape)
         self.row_embed = self.add_weight(
             name='row_embed', shape=(self.height, self.num_pos_feats),
@@ -103,3 +104,8 @@ def build_position_encoding(args):
         raise ValueError(f"not supported {args.position_embedding}")
 
     return position_embedding
+
+get_custom_objects().update({
+    'PositionEmbeddingSine': PositionEmbeddingSine,
+    'PositionEmbeddingLearned': PositionEmbeddingLearned,
+})
