@@ -7,7 +7,7 @@ DETR Transformer class based on torch.nn.Transformer but written in TF2/Keras.
 from typing import Optional, List, Union, Callable
 
 import tensorflow as tf
-from tf.keras import layers
+from tensorflow.keras import layers
 
 class FeedForward:
     # Implementation of Feedforward unit
@@ -82,8 +82,8 @@ class TransformerEncoderDecoder:
     def __call__(self, src, mask, query_embed, pos_embed):
         # flatten NxHxWxC to NxHWxC
         src = tf.reshape(src, [src.shape[0], -1, src.shape[-1]])
-        # pos_embed = pos_embed.flatten(2).permute(2, 0, 1)
-        # query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
+        pos_embed = tf.reshape(pos_embed, [pos_embed.shape[0], -1, pos_embed.shape[-1]])
+        query_embed = tf.stack([query_embed] * src.shape[0], axis=0)
         mask = tf.reshape(mask, [mask.shape[0], -1])
 
         tgt = tf.zeros_like(query_embed)
