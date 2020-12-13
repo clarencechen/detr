@@ -15,7 +15,6 @@ class PositionEmbeddingSine(layers.Layer):
     """
     def __init__(self, num_pos_feats=64, temperature=10000, normalize=False, scale=None):
         super().__init__()
-        self.chw = K.image_data_format() == 'channels_first'
         self.num_pos_feats = num_pos_feats
         self.temperature = temperature
         self.normalize = normalize
@@ -54,7 +53,7 @@ class PositionEmbeddingSine(layers.Layer):
         pos_x = tf.reshape(tf.stack([tf.sin(pos_x[:, :, :, 0::2]), tf.cos(pos_x[:, :, :, 1::2])], 4), pos_x.shape[:3] + [-1])
         pos_y = tf.reshape(tf.stack([tf.sin(pos_y[:, :, :, 0::2]), tf.cos(pos_y[:, :, :, 1::2])], 4), pos_y.shape[:3] + [-1])
         pos = tf.concatenate([pos_y, pos_x], 3)
-        if self.chw:
+        if K.image_data_format() == 'channels_first':
             pos = tf.transpose(pos, [0, 3, 1, 2])
         return pos
 
@@ -64,8 +63,8 @@ class PositionEmbeddingLearned(layers.Layer):
     Absolute pos embedding, learned.
     """
     def __init__(self, num_pos_feats=256):
-        self.chw = K.image_data_format() == 'channels_first'
         super().__init__()
+        self.num_pos_feats = num_pos_feats
 
     def get_config(self):
         child_config = {'num_pos_feats': self.num_pos_feats}
@@ -87,7 +86,7 @@ class PositionEmbeddingLearned(layers.Layer):
             tf.stack([self.col_embed] * self.height, 0),
             tf.stack([self.row_embed] * self.width, 1),
         ], dim=-1)
-        if self.chw:
+        if K.image_data_format() == 'channels_first':
             pos = tf.permute(pos, [2, 0, 1])
         pos = tf.expand_dims(pos, 0)
         return pos
