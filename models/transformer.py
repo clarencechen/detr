@@ -79,7 +79,7 @@ class TransformerEncoderDecoder:
                                     for i in range(num_decoder_layers)]
             self.decoder_norm = layers.LayerNormalization()
 
-    def __call__(self, src, mask, query_embed, pos_embed):
+    def __call__(self, src: tf.Tensor, mask: tf.Tensor, query_embed: tf.Tensor, pos_embed: tf.Tensor, training: bool):
         # flatten NxHxWxC to NxHWxC
         src = tf.reshape(src, [src.shape[0], -1, src.shape[-1]])
         pos_embed = tf.reshape(pos_embed, [pos_embed.shape[0], -1, pos_embed.shape[-1]])
