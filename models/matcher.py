@@ -30,6 +30,7 @@ class HungarianMatcher:
         self.cost_giou = cost_giou
         assert cost_class != 0 or cost_bbox != 0 or cost_giou != 0, "all costs cant be 0"
 
+    @tf.function
     def __call__(self, outputs, targets):
         """ Performs the matching
 
@@ -39,7 +40,7 @@ class HungarianMatcher:
                  "pred_boxes": Tensor of dim [batch_size, num_queries, 4] with the predicted box coordinates
 
             targets: This is a list of targets (len(targets) = batch_size), where each target is a dict containing:
-                 "id": Tensor of dim [num_target_boxes] (where num_target_boxes is the number of ground-truth
+                 "label": Tensor of dim [num_target_boxes] (where num_target_boxes is the number of ground-truth
                            objects in the target) containing the class labels
                  "bbox": Tensor of dim [num_target_boxes, 4] containing the target box coordinates
 
@@ -54,37 +55,32 @@ class HungarianMatcher:
 
         # We flatten to compute the cost matrices in a batch
         out_prob = tf.nn.softmax(tf.reshape(outputs["pred_logits"], [bs * num_queries, -1]), axis=-1)  # [batch_size * num_queries, num_classes]
-        out_bbox = tf.reshape(outputs["pred_boxes"], [bs * num_queries, -1])  # [batch_size * num_queries, 4]
+        out_boxes = tf.reshape(outputs["pred_boxes"], [bs * num_queries, -1])  # [batch_size * num_queries, 4]
 
         # Also concat the target labels and boxes
-        tgt_ids = tf.concat([v["id"] for v in targets], 0)
-        tgt_bbox = tf.concat([v["bbox"] for v in targets], 0)
+        tgt_labels = tf.concat([v["label"] for v in targets], 0)
+        tgt_boxes = tf.concat([v["bbox"] for v in targets], 0)
 
         # Compute the classification cost. Contrary to the loss, we don't use the NLL,
         # but approximate it in 1 - proba[target class].
         # The 1 is a constant that doesn't change the matching, it can be ommitted.
-        cost_class = -tf.gather(out_prob, tgt_ids, axis=1)
+        cost_class = -tf.gather(out_prob, tgt_labels, axis=1)
 
-        # Compute the L1 cost between boxes
-        cost_bbox = tf.reduce_mean(tf.abs(out_bbox - tgt_bbox), axis=-1)
+        # Compute the L1 cost between all pairs of boxes
+        cost_bbox = tf.reduce_mean(tf.abs(tf.expand_dims(out_boxes, -2) - tgt_boxes), axis=-1)
 
-        # Compute the giou cost betwen boxes
-        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
+        # Compute the giou cost betwen all pairs of boxes
+        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_boxes), box_cxcywh_to_xyxy(tgt_boxes))
 
-        # Final cost matrix
+        # Final cost matrix with shape [batch_size * num_queries, num_target_boxes]
         C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
         C = tf.reshape(bs, num_queries, -1)
 
         sizes = [len(v["bbox"]) for v in targets]
 
-        offset, indices = 0, []
-        for i, c in enumerate(sizes):
-            src_idxs, tgt_idxs = linear_sum_assignment(C[i, :, offset:offset + c]))
-            indices.append((tf.Variable(src_idxs, dtype=tf.int64, trainable=False), 
-                     tf.Variable(tgt_idxs, dtype=tf.int64, trainable=False)))
-            offset += c
+        indices = [linear_sum_assignment(c[i]) for i, c in enumerate(tf.split(C, sizes, axis=-1))]
 
-        return indices
+        return [tf.Variable(i, dtype=tf.int64, trainable=False), tf.Variable(j, dtype=tf.int64, trainable=False) for i, j in indices]
 
 
 def build_matcher(args):
