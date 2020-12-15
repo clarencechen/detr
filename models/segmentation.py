@@ -106,7 +106,6 @@ def dice_loss(inputs, targets, num_boxes):
                 (0 for the negative class and 1 for the positive class).
     """
     inputs = tf.sigmoid(inputs)
-    inputs = tf.reshape(inputs, [inputs.shape[0], -1])
     numerator = 2 * tf.reduce_sum(inputs * targets, axis=-1)
     denominator = tf.reduce_sum(inputs, axis=-1) + tf.reduce_sum(targets, axis=-1)
     loss = 1 - (numerator + 1) / (denominator + 1)
@@ -139,4 +138,4 @@ def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: f
         alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
         loss = alpha_t * loss
 
-    return tf.mean(loss, -1) / num_boxes
+    return tf.reduce_mean(loss, axis=-1) / num_boxes
