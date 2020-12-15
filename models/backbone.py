@@ -33,17 +33,12 @@ def _backbone(self, in_tensor: tf.Tensor, name: str, train_backbone: bool, retur
         out_layers = ['conv5_block3_out']
     return [encoder_model.get_layer(name).output for name in out_layers]
 
-def _joiner(backbone_outputs: tf.Tensor, pos_embedding: layers.Layer):
-    pos: List[tf.Tensor] = []
-    for t in backbone_outputs:
-        pos.append(tf.cast(pos_embedding(), t.dtype))
-    return pos
 
 def build_backbone(args, in_tensor: tf.Tensor):
     position_embedding = build_position_encoding(args)
     train_backbone = args.lr_backbone > 0
     return_interm_layers = args.masks
     backbone_outputs = _backbone(in_tensor, args.backbone, train_backbone, return_interm_layers)
-    pos_outputs = _joiner(backbone, position_embedding)
+    pos_outputs = [tf.cast(position_embedding(t), t.dtype) for t in backbone_outputs]
     model = Model(inputs=in_tensor, outputs=(backbone_outputs, pos_outputs))
     return model

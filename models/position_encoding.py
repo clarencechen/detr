@@ -37,7 +37,7 @@ class PositionEmbeddingSine(layers.Layer):
     def build(self, input_shape):
         self.height, self.width = input_shape[-2:] if K.image_data_format() == 'channels_first' else input_shape[-3:-1]
 
-    def call(self):
+    def call(self, inputs):
         y_range = tf.range(height, dtype=tf.float32)
         x_range = tf.range(width, dtype=tf.float32)
         y_embed, x_embed = tf.expand_dims(tf.meshgrid(y_range, x_range), 0)
@@ -81,7 +81,7 @@ class PositionEmbeddingLearned(layers.Layer):
             name='col_embed', shape=(self.width, self.num_pos_feats),
             initializer='glorot_uniform', trainable=True)
 
-    def call(self):
+    def call(self, inputs):
         i, j = tf.range(self.width), tf.range(self.height)
         pos = tf.concatenate([
             tf.stack([self.col_embed] * self.height, 0),
