@@ -22,8 +22,7 @@ class DETR():
     def __init__(self, backbone, transformer, num_classes, num_queries, training, aux_loss=False, panoptic_seg_head=False, freeze_detr=False):
         """ Initializes the model.
         Parameters:
-            backbone: torch module of the backbone to be used. See backbone.py
-            transformer: torch module of the transformer architecture. See transformer.py
+            transformer: keras functional layer graph of the transformer architecture. See transformer.py
             num_classes: number of object classes
             num_queries: number of object queries, ie detection slot. This is the maximal number of objects
                          DETR can detect in a single image. For COCO, we recommend 100 queries.
@@ -37,7 +36,6 @@ class DETR():
         self.bbox_embed = Sequential([layers.Dense(hidden_dim, activation='relu')] * 2 + [layers.Dense(4, activation='sigmoid')])
         self.query_embed = layers.Embedding(num_queries, hidden_dim)
         self.input_proj = layers.Conv2D(hidden_dim, kernel_size=1)
-        self.backbone = backbone
         self.aux_loss = aux_loss
         self.panoptic_seg_head = panoptic_seg_head
         self.is_training = training
@@ -50,9 +48,10 @@ class DETR():
             self.bbox_attention = MHAttentionMap(hidden_dim, hidden_dim, nheads, dropout=0.0)
             self.mask_head = MaskHeadSmallConv(hidden_dim + nheads, [1024, 512, 256], hidden_dim)
 
-    def build(self, inputs, masks):
+    def build(self, features, pos, masks):
         """ The output Keras model expects two inputs, which consists of:
-               - inputs: batched images, of shape [batch_size x H x W x 3]
+               - features: list of batched features from backbone, each of shape [batch_size x F_H x F_W x num_channels]
+               - pos: position embeddings, of shape [1 x H x W x num_pos_feats]
                - masks: batched binary masks, of shape [batch_size x H x W], containing 1 on padded pixels
 
             It returns a dict with the following elements:
@@ -65,7 +64,6 @@ class DETR():
                - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
                                 dictionnaries containing the two above keys for each decoder layer.
         """
-        features, pos = self.backbone(inputs)
         src_proj = self.input_proj(features[-1])
         hs, memory = self.transformer(src_proj, masks, self.query_embed.weights[0], pos[-1], training=self.is_training)
 
@@ -83,7 +81,7 @@ class DETR():
             outputs_seg_masks = tf.reshape(seg_masks, [-1, self.num_queries, seg_masks.shape[-3], seg_masks.shape[-2]])
             out["pred_masks"] = outputs_seg_masks
 
-        return Model(inputs=(inputs, masks), outputs=out)
+        return Model(inputs=(features, pos, masks), outputs=out)
 
     def _set_aux_loss(self, outputs_class, outputs_coord):
         # this is a workaround to make torchscript happy, as torchscript
@@ -93,13 +91,13 @@ class DETR():
                 for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
 
 
-class SetCriterion(nn.Module):
+class SetCriterion(Model):
     """ This class computes the loss for DETR.
     The process happens in two steps:
         1) we compute hungarian assignment between ground truth boxes and the outputs of the model
         2) we supervise each pair of matched ground-truth / prediction (supervise class and box)
     """
-    def __init__(self, num_classes, matcher, weight_dict, eos_coef, losses):
+    def __init__(self, num_classes, matcher, weight_dict, eos_coef, losses, **kwargs):
         """ Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -108,7 +106,7 @@ class SetCriterion(nn.Module):
             eos_coef: relative classification weight applied to the no-object category
             losses: list of all the losses to be applied. See get_loss for list of available losses.
         """
-        super().__init__()
+        super(SetCriterion, self).__init__(**kwargs)
         self.num_classes = num_classes
         self.matcher = matcher
         self.weight_dict = weight_dict
@@ -122,11 +120,11 @@ class SetCriterion(nn.Module):
         """
         assert 'pred_logits' in outputs
         
-        src_logits = _get_src_permutation(outputs, indices, "pred_logits")
+        src_logits = outputs["pred_logits"]
         target_classes_o = _get_tgt_permutation(targets, indices, "label")
 
         target_classes = tf.fill(src_logits.shape[:2], self.num_classes, dtype=tf.int64)
-        -> target_classes[idx] = target_classes_o
+        target_classes = _fill_src_permutation(target_classes, indices, target_classes_o)
 
         loss_ce = losses.sparse_categorical_crossentropy(src_logits, target_classes)
         sample_weight = tf.where(target_classes == self.num_classes, self.eos_coef, 1)
@@ -135,6 +133,7 @@ class SetCriterion(nn.Module):
 
         return losses
 
+    @tf.function
     def loss_class_error(self, outputs, targets, indices):
         """TargetbBox classification error
         targets dicts must contain the key "label" containing a tensor of dim [nb_target_boxes]
@@ -145,9 +144,10 @@ class SetCriterion(nn.Module):
         permuted_logits = _get_src_permutation(outputs, indices, "pred_logits")
         target_classes_o = _get_tgt_permutation(targets, indices, "label")
 
-        losses = {'class_error': 100 - tf.reduce_mean(accuracy(permuted_logits, target_classes_o)[0]))}
+        losses = {'class_error': 100 - tf.nn.compute_average_loss(accuracy(permuted_logits, target_classes_o)[0])}
         return losses
 
+    @tf.function
     def loss_cardinality(self, outputs, targets, indices, num_boxes):
         """ Compute the cardinality error, ie the absolute error in the number of predicted non-empty boxes
         This is not really a loss, it is intended for logging purposes only. It doesn't propagate gradients
@@ -216,8 +216,13 @@ class SetCriterion(nn.Module):
     @tf.function
     def _get_src_permutation(outputs: tf.Tensor, indices: List[tf.Tensor], attr: str):
         # retrieve permutation of each output tensor of shape [batch_size, num_queries, ...] in batch following indices
-        paired_idx = tf.concat([tf.concat([i * tf.ones_like(src, dtype=tf.int64), src], axis=1) for i, (src, _) in enumerate(indices)], axis=0)
-        return tf.gather_nd(outputs, paired_idx, axis=0)
+        batch_query_idx = tf.concat([tf.stack([i * tf.ones_like(src, dtype=tf.int64), src], axis=1) for i, (src, _) in enumerate(indices)], axis=0)
+        return tf.gather_nd(outputs, batch_query_idx, axis=0)
+
+    @tf.function
+    def _fill_src_permutation(template: tf.Tensor, indices: List[tf.Tensor], outputs: tf.Tensor):
+        batch_query_idx = tf.concat([tf.stack([i * tf.ones_like(src, dtype=tf.int64), src], axis=1) for i, (src, _) in enumerate(indices)], axis=0)
+        return tf.tensor_scatter_nd_update(template, batch_query_idx, outputs)
 
     @tf.function
     def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
@@ -232,7 +237,7 @@ class SetCriterion(nn.Module):
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
 
     @tf.function
-    def __call__(self, outputs, targets):
+    def call(self, outputs, targets):
         """ This performs the loss computation.
         Parameters:
              outputs: dict of tensors, see the output specification of the model for the format
@@ -283,6 +288,7 @@ def build(args, strategy):
     # you should pass `num_classes` to be 2 (max_obj_id + 1).
     # For more details on this, check the following discussion
     # https://github.com/facebookresearch/detr/issues/108#issuecomment-650269223
+    total_batch_size = args.batch_size * strategy.num_replicas_in_sync
     num_classes = 20 if args.dataset_file != 'coco' else 91
     if args.dataset_file == "coco_panoptic":
         # for panoptic, we just add a num_classes that is large enough to hold
@@ -302,22 +308,19 @@ def build(args, strategy):
         weight_dict.update(aux_weight_dict)
 
     with strategy.scope():
-        input_layer = layers.Input((..., 3))
-        masks_input_layer = layers.Input((args. * strategy.num_replicas_in_sync, ..., 3))
+        input_layer = layers.Input((total_batch_size, args.image_height, args.image_width, 3))
+        masks_input_layer = layers.Input((total_batch_size, args.image_height, args.image_width))
 
         backbone = build_backbone(args, input_layer)
-        transformer = build_transformer(args)
-
-        model = DETR(
-            backbone,
-            transformer,
+        detector = DETR(
+            build_transformer(args),
             num_classes=num_classes,
             num_queries=args.num_queries,
             aux_loss=args.aux_loss,
             panoptic_seg_head=args.masks,
             freeze_detr=(args.frozen_weights is not None),
             training=(not args.eval)
-        ).build(input_layer, masks_input_layer)
+        ).build(backbone.outputs[0], backbone.outputs[1], masks_input_layer)
         matcher = build_matcher(args)
 
         losses = ['labels', 'boxes', 'cardinality']
@@ -333,4 +336,4 @@ def build(args, strategy):
                 is_thing_map = {i: i <= 90 for i in range(201)}
                 postprocessors["panoptic"] = PostProcessPanoptic(is_thing_map, threshold=0.85)
 
-    return model, criterion, postprocessors
+    return backbone, detector, criterion, postprocessors
