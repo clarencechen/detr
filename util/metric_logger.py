@@ -6,7 +6,7 @@ Mostly copy-paste from torchvision references.
 """
 import subprocess
 import time
-from collections import defaultdict, deque
+from collections import defaultdict
 import datetime
 
 import numpy as np
@@ -20,24 +20,25 @@ class SmoothedValue(object):
     def __init__(self, window_size=20, fmt=None):
         if fmt is None:
             fmt = "{median:.4f} ({global_avg:.4f})"
-        self.deque = deque(maxlen=window_size)
+        self.deque = np.zeros((window_size), dtype=np.float64)
         self.total = 0.0
         self.count = 0
         self.fmt = fmt
+        self.window_size = window_size
 
-    def update(self, value, n=1):
-        self.deque.append(value)
-        self.count += n
-        self.total += value * n
+    def update(self, value):
+        self.deque[self.count % self.window_size] = value
+        self.count += 1
+        self.total += value
 
     @property
     def median(self):
-        d = np.array(list(self.deque))
+        d = self.deque[:min(self.count, self.window_size)]
         return np.median(d)
 
     @property
     def avg(self):
-        d = np.array(list(self.deque), dtype=np.float32)
+        d = self.deque[:min(self.count, self.window_size)]
         return np.mean(d)
 
     @property
@@ -46,11 +47,12 @@ class SmoothedValue(object):
 
     @property
     def max(self):
-        return max(self.deque)
+        d = self.deque[:min(self.count, self.window_size)]
+        return np.max(d)
 
     @property
     def value(self):
-        return self.deque[-1]
+        return self.deque[self.count % self.window_size]
 
     def __str__(self):
         return self.fmt.format(
