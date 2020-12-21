@@ -3,12 +3,8 @@
 Backbone modules.
 """
 import tensorflow as tf
-import tensorflow.keras.backend as K
 from tensorflow.keras import layers, applications
 from tensorflow.keras import Model
-from typing import List
-
-from util.misc import is_main_process
 
 from .position_encoding import build_position_encoding
 
@@ -16,9 +12,7 @@ from .position_encoding import build_position_encoding
 def _backbone(self, in_tensor: tf.Tensor, name: str, train_backbone: bool, return_interm_layers: bool):
     """Returns outputs of ResNet backbone with frozen BatchNorm."""
 
-    backbone = getattr(applications, name)(weights=('imagenet' if is_main_process() else None),
-        include_top=False,
-        input_tensor=in_tensor)
+    backbone = getattr(applications, name)(weights='imagenet', include_top=False, input_tensor=in_tensor)
 
     # Freeze BatchNorm Layers
     for l in backbone.layers:
