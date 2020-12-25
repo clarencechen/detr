@@ -5,118 +5,111 @@ Train and eval functions used in main.py
 import math
 import os
 import sys
-from typing import Iterable
+from typing import Tuple, Iterable
 
-import torch
+import tensorflow as tf
 
 import util.misc as utils
+from utis.metric_logger import MetricLogger, SmoothedValue
 from datasets.coco_eval import CocoEvaluator
 from datasets.panoptic_eval import PanopticEvaluator
 
 
-def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
-                    data_loader: Iterable, optimizer: torch.optim.Optimizer,
-                    device: torch.device, epoch: int, max_norm: float = 0):
-    model.train()
-    criterion.train()
-    metric_logger = utils.MetricLogger(delimiter="  ")
-    metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
-    metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
-    header = 'Epoch: [{}]'.format(epoch)
+def train_one_epoch(model: Tuple[tf.keras.Model], criterion: tf.keras.Model,
+                    data_iter: Iterable, optimizer: Tuple[tf.train.Optimizer],
+                    strategy: tf.distribute.Strategy, epoch: int, max_norm: float = 0):
+    backbone, detector = model
+    b_optimizer, d_optimizer = optimizer
+    metric_logger = MetricLogger(delimiter="  ")
+    metric_logger.add_meter('lr', SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    metric_logger.add_meter('class_error', SmoothedValue(window_size=1, fmt='{value:.2f}'))
+    train_summary_writer = tf.summary.create_file_writer()
     print_freq = 10
 
-    for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
-        samples = samples.to(device)
-        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+    @tf.function
+    def train_step(inputs, masks, targets, weight_dict={}):
+        with tf.GradientTape() as tape:
+            loss_dict = criterion(detector(backbone(inputs), masks), targets)
+            losses = tf.reduce_sum([loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict])
 
-        outputs = model(samples)
-        loss_dict = criterion(outputs, targets)
-        weight_dict = criterion.weight_dict
-        losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+        b_vars, d_vars = backbone.trainable_variables detector.trainable_variables
+        b_grad, d_grad = tape.gradient(loss, b_vars), tape.gradient(loss, d_vars)
+        b_grad = [tf.clip_by_norm(grad, max_norm) for grad in b_grad]
+        d_grad = [tf.clip_by_norm(grad, max_norm) for grad in d_grad]
+        d_optimizer.apply_gradients(zip(d_grad, d_vars))
+        b_optimizer.apply_gradients(zip(b_grad, b_vars))
+        return loss_dict
+
+    for data in metric_logger.log_every(data_iter, print_freq, header=f'Epoch: [{epoch}]'):
+        loss_dict = strategy.run(train_step, args=data, kwargs={'weight_dict': criterion.weight_dict})
 
         # reduce losses over all GPUs for logging purposes
-        loss_dict_reduced = utils.reduce_dict(loss_dict)
-        loss_dict_reduced_unscaled = {f'{k}_unscaled': v
-                                      for k, v in loss_dict_reduced.items()}
-        loss_dict_reduced_scaled = {k: v * weight_dict[k]
-                                    for k, v in loss_dict_reduced.items() if k in weight_dict}
-        losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
-
-        loss_value = losses_reduced_scaled.item()
+        ldict_reduced, ldict_reduced_raw, ldict_reduced_scld = utils.reduce_dict(strategy, loss_dict, criterion.weight_dict)
+        loss_value = tf.reduce_sum(ldict_reduced_scld.values())
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
-            print(loss_dict_reduced)
+            for k, v in ldict_reduced.items():
+                tf.print(k, ": ", v)
             sys.exit(1)
 
-        optimizer.zero_grad()
-        losses.backward()
-        if max_norm > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-        optimizer.step()
+        step = d_optimizer.iterations
+        if step % print_freq == 0:
+            with train_summary_writer.as_default():
+                tf.summary.scalar('train/lr', d_optimizer.lr(step), step=step)
+                for (k, v), (k_u, v_u) in zip(ldict_reduced_scld.items(), ldict_reduced_raw.items()):
+                    tf.summary.scalar(f'train/losses/scaled/{k}', v, step=step)
+                    tf.summary.scalar(f'train/losses/unscaled/{k_u}', v_u, step=step)
+                tf.summary.scalar(f'train/metrics/class_error', ldict_reduced['class_error'], step=step)
 
-        metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
-        metric_logger.update(class_error=loss_dict_reduced['class_error'])
-        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
-    # gather the stats from all processes
-    metric_logger.synchronize_between_processes()
+        metric_logger.update(class_error=ldict_reduced['class_error'])
+        metric_logger.update(lr=d_optimizer.lr(step))
+
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
-@torch.no_grad()
-def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, output_dir):
-    model.eval()
-    criterion.eval()
-
-    metric_logger = utils.MetricLogger(delimiter="  ")
+def evaluate(model, criterion, postprocessors, data_iter, strategy, output_dir):
+    backbone, detector = model
+    metric_logger = MetricLogger(delimiter="  ")
     metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
-    header = 'Test:'
+    train_summary_writer = tf.summary.create_file_writer()
+    print_freq = 10
+    coco_evaluator = panoptic_evaluator = None
 
     iou_types = tuple(k for k in ('segm', 'bbox') if k in postprocessors.keys())
-    coco_evaluator = CocoEvaluator(base_ds, iou_types)
-    # coco_evaluator.coco_eval[iou_types[0]].params.iouThrs = [0, 0.1, 0.5, 0.75]
 
-    panoptic_evaluator = None
-    if 'panoptic' in postprocessors.keys():
-        panoptic_evaluator = PanopticEvaluator(
-            data_loader.dataset.ann_file,
-            data_loader.dataset.ann_folder,
-            output_dir=os.path.join(output_dir, "panoptic_eval"),
-        )
-
-    for samples, targets in metric_logger.log_every(data_loader, 10, header):
-        samples = samples.to(device)
-        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-
-        outputs = model(samples)
-        loss_dict = criterion(outputs, targets)
-        weight_dict = criterion.weight_dict
+    for data in metric_logger.log_every(data_iter, print_freq, header='Test:'):
+        loss_dict = strategy.run((lambda inputs, masks, targets: criterion(detector(backbone(inputs), masks), targets)),
+                                 args=data)
 
         # reduce losses over all GPUs for logging purposes
-        loss_dict_reduced = utils.reduce_dict(loss_dict)
-        loss_dict_reduced_scaled = {k: v * weight_dict[k]
-                                    for k, v in loss_dict_reduced.items() if k in weight_dict}
-        loss_dict_reduced_unscaled = {f'{k}_unscaled': v
-                                      for k, v in loss_dict_reduced.items()}
-        metric_logger.update(loss=sum(loss_dict_reduced_scaled.values()),
-                             **loss_dict_reduced_scaled,
-                             **loss_dict_reduced_unscaled)
-        metric_logger.update(class_error=loss_dict_reduced['class_error'])
+        ldict_reduced, ldict_reduced_raw, ldict_reduced_scld = utils.reduce_dict(strategy, loss_dict, criterion.weight_dict)
+        loss_value = tf.reduce_sum(ldict_reduced_scld.values())
 
-        orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
+        step = d_optimizer.iterations
+        if step % print_freq == 0:
+            with train_summary_writer.as_default():
+                for (k, v), (k_u, v_u) in zip(ldict_reduced_scld.items(), ldict_reduced_raw.items()):
+                    tf.summary.scalar(f'test/losses/scaled/{k}', v, step=step)
+                    tf.summary.scalar(f'test/losses/unscaled/{k_u}', v_u, step=step)
+                tf.summary.scalar(f'test/metrics/class_error', ldict_reduced['class_error'], step=step)
+
+        metric_logger.update(class_error=ldict_reduced['class_error'])
+
+        orig_target_sizes = tf.stack([t["orig_size"] for t in targets], axis=0)
         results = postprocessors['bbox'](outputs, orig_target_sizes)
         if 'segm' in postprocessors.keys():
-            target_sizes = torch.stack([t["size"] for t in targets], dim=0)
+            target_sizes = tf.stack([t["size"] for t in targets], axis=0)
             results = postprocessors['segm'](results, outputs, orig_target_sizes, target_sizes)
-        res = {target['image_id'].item(): output for target, output in zip(targets, results)}
+        res = {target['image_id'].as_string(): output for target, output in zip(targets, results)}
         if coco_evaluator is not None:
             coco_evaluator.update(res)
 
         if panoptic_evaluator is not None:
             res_pano = postprocessors["panoptic"](outputs, target_sizes, orig_target_sizes)
             for i, target in enumerate(targets):
-                image_id = target["image_id"].item()
+                image_id = tf.strings.as_string(target["image_id"])
                 file_name = f"{image_id:012d}.png"
                 res_pano[i]["image_id"] = image_id
                 res_pano[i]["file_name"] = file_name
@@ -124,7 +117,6 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
             panoptic_evaluator.update(res_pano)
 
     # gather the stats from all processes
-    metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     if coco_evaluator is not None:
         coco_evaluator.synchronize_between_processes()

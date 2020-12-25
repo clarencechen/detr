@@ -31,7 +31,7 @@ class HungarianMatcher:
         assert cost_class != 0 or cost_bbox != 0 or cost_giou != 0, "all costs cant be 0"
 
     @tf.function
-    def __call__(self, outputs, targets):
+    def __call__(self, outputs, targets, lengths):
         """ Performs the matching
 
         Params:
@@ -39,46 +39,40 @@ class HungarianMatcher:
                  "pred_logits": Tensor of dim [batch_size, num_queries, num_classes] with the classification logits
                  "pred_boxes": Tensor of dim [batch_size, num_queries, 4] with the predicted box coordinates
 
-            targets: This is a list of targets (len(targets) = batch_size), where each target is a dict containing:
-                 "label": Tensor of dim [num_target_boxes] (where num_target_boxes is the number of ground-truth
-                           objects in the target) containing the class labels
-                 "bbox": Tensor of dim [num_target_boxes, 4] containing the target box coordinates
+            targets: This is a dict of targets containing key-value pairs:
+                 "labels": Tensor of dim [num_valid_targets] (where num_valid_targets is the number of ground-truth
+                           objects in the target batch) containing the class labels
+                 "boxes": Tensor of dim [num_valid_targets, 4] containing the target box coordinates
 
         Returns:
             A list of size batch_size, containing tuples of (index_i, index_j) where:
                 - index_i is the indices of the selected predictions (in order)
                 - index_j is the indices of the corresponding selected targets (in order)
             For each batch element, it holds:
-                len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
+                len(index_i) = len(index_j) = min(num_queries, lengths[n])
         """
-        bs, num_queries = outputs["pred_logits"].shape[:2]
+        bs, num_queries = tf.shape(outputs["pred_logits"])[:2]
 
         # We flatten to compute the cost matrices in a batch
         out_prob = tf.nn.softmax(tf.reshape(outputs["pred_logits"], [bs * num_queries, -1]), axis=-1)  # [batch_size * num_queries, num_classes]
         out_boxes = tf.reshape(outputs["pred_boxes"], [bs * num_queries, -1])  # [batch_size * num_queries, 4]
 
-        # Also concat the target labels and boxes
-        tgt_labels = tf.concat([v["label"] for v in targets], 0)
-        tgt_boxes = tf.concat([v["bbox"] for v in targets], 0)
-
         # Compute the classification cost. Contrary to the loss, we don't use the NLL,
         # but approximate it in 1 - proba[target class].
         # The 1 is a constant that doesn't change the matching, it can be ommitted.
-        cost_class = -tf.gather(out_prob, tgt_labels, axis=1)
+        cost_class = -tf.gather(out_prob, targets["labels"], axis=1)
 
         # Compute the L1 cost between all pairs of boxes
-        cost_bbox = tf.reduce_mean(tf.abs(tf.expand_dims(out_boxes, -2) - tgt_boxes), axis=-1)
+        cost_bbox = tf.reduce_mean(tf.abs(tf.expand_dims(out_boxes, -2) - targets["boxes"]), axis=-1)
 
         # Compute the giou cost betwen all pairs of boxes
-        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_boxes), box_cxcywh_to_xyxy(tgt_boxes))
+        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_boxes), box_cxcywh_to_xyxy(targets["boxes"]))
 
-        # Final cost matrix with shape [batch_size * num_queries, num_target_boxes]
+        # Final cost matrix with shape [batch_size * num_queries, num_valid_targets]
         C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
         C = tf.reshape(bs, num_queries, -1)
 
-        sizes = [len(v["bbox"]) for v in targets]
-
-        indices = [linear_sum_assignment(c[i]) for i, c in enumerate(tf.split(C, sizes, axis=-1))]
+        indices = [linear_sum_assignment(c[i]) for i, c in enumerate(tf.split(C, lengths, axis=-1))]
 
         return [tf.Variable(i, dtype=tf.int64, trainable=False), tf.Variable(j, dtype=tf.int64, trainable=False) for i, j in indices]
 
