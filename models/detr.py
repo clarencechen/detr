@@ -40,10 +40,6 @@ class DETR():
         self.panoptic_seg_head = panoptic_seg_head
         self.is_training = training
 
-        #if freeze_detr:
-        #   for p in self.parameters():
-        #       p.trainable = False
-
         if panoptic_seg_head:
             self.bbox_attention = MHAttentionMap(hidden_dim, hidden_dim, nheads, dropout=0.0)
             self.mask_head = MaskHeadSmallConv(hidden_dim + nheads, [1024, 512, 256], hidden_dim)
