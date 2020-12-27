@@ -29,11 +29,11 @@ def train_one_epoch(model: Tuple[tf.keras.Model], criterion: tf.keras.Model,
     @tf.function
     def train_step(inputs, masks, targets, weight_dict={}):
         with tf.GradientTape() as tape:
-            loss_dict = criterion(detector(backbone(inputs), masks), targets)
-            losses = tf.reduce_sum([loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict])
+            loss_dict = criterion(detector(backbone(inputs, masks)), targets)
+            total_loss = tf.reduce_sum([loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict])
 
-        b_vars, d_vars = backbone.trainable_variables detector.trainable_variables
-        b_grad, d_grad = tape.gradient(loss, b_vars), tape.gradient(loss, d_vars)
+        b_vars, d_vars = backbone.trainable_variables, detector.trainable_variables
+        b_grad, d_grad = tape.gradient(total_loss, b_vars), tape.gradient(total_loss, d_vars)
         b_grad = [tf.clip_by_norm(grad, max_norm) for grad in b_grad]
         d_grad = [tf.clip_by_norm(grad, max_norm) for grad in d_grad]
         d_optimizer.apply_gradients(zip(d_grad, d_vars))
@@ -77,14 +77,20 @@ def evaluate(model, criterion, postprocessors, data_iter, strategy, output_dir):
     print_freq = 10
     coco_evaluator = panoptic_evaluator = None
 
-    iou_types = tuple(k for k in ('segm', 'bbox') if k in postprocessors.keys())
+    iou_types = postprocessors['iou_types']
+
+    @tf.function
+    def eval_step(inputs, masks, targets):
+        outputs = detector(backbone(inputs, masks))
+        loss_dict = criterion(outputs, targets)
+        return outputs, loss_dict
 
     for data in metric_logger.log_every(data_iter, print_freq, header='Test:'):
-        loss_dict = strategy.run((lambda inputs, masks, targets: criterion(detector(backbone(inputs), masks), targets)),
-                                 args=data)
+        outputs, loss_dict = strategy.run(eval_step, args=data)
 
         # reduce losses over all GPUs for logging purposes
         ldict_reduced, ldict_reduced_raw, ldict_reduced_scld = utils.reduce_dict(strategy, loss_dict, criterion.weight_dict)
+        outputs = utils.gather_dict(strategy, outputs)
         loss_value = tf.reduce_sum(ldict_reduced_scld.values())
 
         step = d_optimizer.iterations
@@ -97,31 +103,24 @@ def evaluate(model, criterion, postprocessors, data_iter, strategy, output_dir):
 
         metric_logger.update(class_error=ldict_reduced['class_error'])
 
-        orig_target_sizes = tf.stack([t["orig_size"] for t in targets], axis=0)
-        results = postprocessors['bbox'](outputs, orig_target_sizes)
-        if 'segm' in postprocessors.keys():
-            target_sizes = tf.stack([t["size"] for t in targets], axis=0)
-            results = postprocessors['segm'](results, outputs, orig_target_sizes, target_sizes)
-        res = {target['image_id'].as_string(): output for target, output in zip(targets, results)}
+        _, _, targets = data
+        results = postprocessors['detr'](outputs, targets["orig_size"], targets["size"])
+
+        res = {tf.strings.as_string(targets['image_id'][i]): r for i, r in enumerate(results)}
         if coco_evaluator is not None:
             coco_evaluator.update(res)
 
         if panoptic_evaluator is not None:
-            res_pano = postprocessors["panoptic"](outputs, target_sizes, orig_target_sizes)
-            for i, target in enumerate(targets):
-                image_id = tf.strings.as_string(target["image_id"])
-                file_name = f"{image_id:012d}.png"
-                res_pano[i]["image_id"] = image_id
-                res_pano[i]["file_name"] = file_name
+            res_pano = postprocessors["panoptic"](outputs, targets["orig_size"], targets["size"])
+            for i, r in enumerate(res_pano):
+                image_id = target["image_id"][i]
+                r["image_id"] = tf.strings.as_string(image_id)
+                r["file_name"] = f"{image_id:012d}.png"
 
             panoptic_evaluator.update(res_pano)
 
     # gather the stats from all processes
     print("Averaged stats:", metric_logger)
-    if coco_evaluator is not None:
-        coco_evaluator.synchronize_between_processes()
-    if panoptic_evaluator is not None:
-        panoptic_evaluator.synchronize_between_processes()
 
     # accumulate predictions from all images
     if coco_evaluator is not None:
@@ -132,9 +131,9 @@ def evaluate(model, criterion, postprocessors, data_iter, strategy, output_dir):
         panoptic_res = panoptic_evaluator.summarize()
     stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
     if coco_evaluator is not None:
-        if 'bbox' in postprocessors.keys():
+        if 'bbox' in iou_types:
             stats['coco_eval_bbox'] = coco_evaluator.coco_eval['bbox'].stats.tolist()
-        if 'segm' in postprocessors.keys():
+        if 'segm' in iou_types:
             stats['coco_eval_masks'] = coco_evaluator.coco_eval['segm'].stats.tolist()
     if panoptic_res is not None:
         stats['PQ_all'] = panoptic_res["All"]

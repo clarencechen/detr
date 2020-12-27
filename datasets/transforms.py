@@ -140,6 +140,6 @@ class RandomResizeExtd(pp_layers.PreprocessingLayer):
             training = learning_phase()
 
         idx = self.rng.uniform([], 0, self.max_idx, dtype=tf.int32)
-        size = self.sizes[idx]
+        size = tf.gather(sizes, idx, axis=0)
         img, tgt = tf.cond(training, resize(img, tgt, size, self.max_size), lambda: img, tgt)
         return img, tgt

@@ -90,7 +90,7 @@ class MHAttentionMap:
 
         if mask is not None:
             weights = tf.where(tf.reshape(mask, [-1, 1] + mask.shape[1:] + [1]), -np.inf, weights)
-        weights = self.dropout(tf.nn.softmax(weights, axis=[2, 3, 4]), training=training)
+        weights = self.dropout(tf.nn.softmax(weights, axis=[2, 3]), training=training)
         return weights
 
 

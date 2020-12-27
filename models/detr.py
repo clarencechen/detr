@@ -48,7 +48,7 @@ class DETR():
         """ The output Keras model expects two inputs, which consists of:
                - features: list of batched features from backbone, each of shape [batch_size x F_H x F_W x num_channels]
                - pos: position embeddings, of shape [1 x H x W x num_pos_feats]
-               - masks: batched binary masks, of shape [batch_size x H x W], containing 1 on padded pixels
+               - masks: batched binary masks, of shape [batch_size x H x W], containing 1 on non-padded pixels
 
             It returns a dict with the following elements:
                - "pred_logits": the classification logits (including no-object) for all queries.
@@ -292,7 +292,6 @@ def build(args, strategy):
     # you should pass `num_classes` to be 2 (max_obj_id + 1).
     # For more details on this, check the following discussion
     # https://github.com/facebookresearch/detr/issues/108#issuecomment-650269223
-    total_batch_size = args.batch_size * strategy.num_replicas_in_sync
     num_classes = 20 if args.dataset_file != 'coco' else 91
     if args.dataset_file == "coco_panoptic":
         # for panoptic, we just add a num_classes that is large enough to hold
@@ -312,10 +311,10 @@ def build(args, strategy):
         weight_dict.update(aux_weight_dict)
 
     with strategy.scope():
-        input_layer = layers.Input((total_batch_size, args.image_height, args.image_width, 3))
-        masks_input_layer = layers.Input((total_batch_size, args.image_height, args.image_width))
+        input_layer = layers.Input((args.max_size, args.max_size, 3))
+        masks_input_layer = layers.Input((args.max_size, args.max_size))
 
-        backbone = build_backbone(args, input_layer)
+        backbone = build_backbone(args, input_layer, masks_input_layer)
         detector = DETR(
             build_transformer(args),
             num_classes=num_classes,
@@ -333,11 +332,13 @@ def build(args, strategy):
         criterion = SetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict,
                                  eos_coef=args.eos_coef, losses=losses)
 
-        postprocessors = {'bbox': PostProcess()}
+        postprocessors = {'detr': PostProcess()}
         if args.masks:
-            postprocessors['segm'] = PostProcessSegm()
-            if args.dataset_file == "coco_panoptic":
+            postprocessors['iou_types'] = ('bbox', 'segm')
+            args.dataset_file == "coco_panoptic":
                 is_thing_map = {i: i <= 90 for i in range(201)}
                 postprocessors["panoptic"] = PostProcessPanoptic(is_thing_map, threshold=0.85)
+        else:
+            postprocessors['iou_types'] = tuple('bbox')
 
     return backbone, detector, criterion, postprocessors

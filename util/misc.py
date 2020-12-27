@@ -24,11 +24,28 @@ def reduce_dict(strategy: tf.distribute.Strategy, input_dict: dict, weight_dict:
     """
     reduce_op = tf.distribute.ReduceOp.MEAN if average else tf.distribute.ReduceOp.SUM
     # sort the keys so that they are consistent across processes
+    reduced_dict = {}
     for k in sorted(input_dict.keys()):
         reduced_dict[k] = strategy.reduce(reduce_op, input_dict[k], axis=None)
     dict_reduced_unscaled = {f'{k}_unscaled': v for k, v in reduced_dict.items()}
     dict_reduced_scaled = {k: v * weight_dict[k] for k, v in reduced_dict.items() if k in weight_dict}
     return reduced_dict, dict_reduced_unscaled, dict_reduced_scaled
+
+
+def gather_dict(strategy: tf.distribute.Strategy, input_dict: dict, axis: int = 0):
+    """
+    Args:
+        strategy: strategy object indicating the devices/threads to gather over
+        input_dict: all the values to be gathered
+    Gather the values in the dictionary from all processes across the specified
+    axis so that the output dict has the results concatenated from all process.
+    Returns a dict with the same fields as input_dict, after gathering.
+    """
+    # sort the keys so that they are consistent across processes
+    gather_dict = {}
+    for k in sorted(input_dict.keys()):
+        gather_dict[k] = strategy.gather(input_dict[k], axis)
+    return gather_dict
 
 
 def get_sha():
@@ -90,6 +107,10 @@ def find_strategy_single_worker(args):
         else:
             strategy = tf.distribute.get_strategy()
     return strategy
+
+
+def get_rank():
+    return 1
 
 
 @tf.function

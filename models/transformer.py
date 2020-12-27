@@ -141,7 +141,7 @@ class TransformerEncoderDecoder:
 class TransformerBaseLayer:
 
     def __init__(self, d_model: int, nhead: int, d_ffn: int = 2048, dropout: float = 0.1,
-                 attn_layer=layers.Attention: Callable[..., layer.Layer],
+                 attn_layer=layers.MultiHeadAttention: Callable[..., layer.Layer],
                  norm_layer=layers.LayerNormalization: Callable[..., layer.Layer],
                  attn_args: dict = {}, norm_args: dict = {}, resid_args: dict = {},
                  ffn_args: dict = {}, ffn_before: bool = False, ffn_after: bool = True
@@ -156,18 +156,19 @@ class TransformerBaseLayer:
             self.norm_ffn_after = norm_layer(**norm_args)
             self.forward_ffn_after = ResidWrapper(self.ffn_after, self.norm_ffn_after, **resid_args)
 
-        self.self_attn = attn_layer(nhead, dropout=dropout, **attn_args)
+        self.self_attn = attn_layer(nhead, d_model // n_head, dropout=dropout, **attn_args)
         self.norm_self_attn = norm_layer(**norm_args)
         self.forward_self_attn = ResidWrapper(self.attn_with_pos, self.norm_self_attn, **resid_args)
 
     def attn_with_pos(self, x: tf.Tensor, training: bool
                      pos: Optional[tf.Tensor] = None,
-                     attn_mask: Optional[tf.Tensor] = None,
+                     attention_mask: Optional[tf.Tensor] = None,
                      key_padding_mask: Optional[tf.Tensor] = None):
         q = k = self.with_pos_embed(x, pos)
+        attention_padding_mask = tf.expand_dims(key_padding_mask, -2)
+        attention_mask = attention_mask & attention_padding_mask
         return self.self_attn(q, k, value=x, training=training,
-                             attn_mask=attn_mask,
-                             key_padding_mask=key_padding_mask)
+                             attention_mask=attention_mask)
 
     def with_pos_embed(self, tensor, pos: Optional[tf.Tensor]):
         return tensor if pos is None else tensor + pos
@@ -186,7 +187,7 @@ class TransformerEncoderLayer(TransformerBaseLayer):
             src = self.forward_ffn_before(src, training=training)
 
         src = self.forward_self_attn(src, training=training,
-                     attn_mask=src_mask,
+                     attention_mask=src_mask,
                      key_padding_mask=src_key_padding_mask,
                      pos=pos)
 
@@ -198,7 +199,7 @@ class TransformerEncoderLayer(TransformerBaseLayer):
 class TransformerDecoderLayer(TransformerBaseLayer):
 
     def __init__(self, d_model: int, nhead: int, d_ffn: int = 2048, dropout: float = 0.1,
-                 attn_layer=layers.Attention: Callable[..., layer.Layer],
+                 attn_layer=layers.MultiHeadAttention: Callable[..., layer.Layer],
                  norm_layer=layers.LayerNormalization: Callable[..., layer.Layer],
                  attn_args: dict = {}, norm_args: dict = {}, resid_args: dict = {},
                  ffn_args: dict = {}, ffn_before: bool = False, ffn_after: bool = True
@@ -207,20 +208,21 @@ class TransformerDecoderLayer(TransformerBaseLayer):
                  attn_layer, norm_layer,
                  attn_args, norm_args, resid_args, ffn_args,
                  ffn_before, ffn_after, **kwargs)
-        self.cross_attn = attn_layer(nhead, dropout=dropout, **attn_args)    
+        self.cross_attn = attn_layer(nhead, d_model // n_head, dropout=dropout, **attn_args)    
         self.norm_cross_attn = norm_layer(**norm_args)
         self.forward_cross_attn = ResidWrapper(self.cross_attn_with_pos, self.norm_cross_attn, **resid_args)
 
     def cross_attn_with_pos(self, tgt: tf.Tensor, memory: tf.Tensor, training: bool,
                      pos: Optional[tf.Tensor] = None,
                      query_pos: Optional[tf.Tensor] = None,
-                     attn_mask: Optional[tf.Tensor] = None,
+                     attention_mask: Optional[tf.Tensor] = None,
                      key_padding_mask: Optional[tf.Tensor] = None):
         q = self.with_pos_embed(tgt, query_pos)
         k = self.with_pos_embed(memory, pos)
+        attention_padding_mask = tf.expand_dims(key_padding_mask, -2)
+        attention_mask = attention_mask & attention_padding_mask
         return self.cross_attn(q, k, value=memory, training=training,
-                     attn_mask=attn_mask,
-                     key_padding_mask=key_padding_mask)
+                     attention_mask=attention_mask)
 
     def __call__(self, tgt: tf.Tensor, memory: tf.Tensor, t: bool,
                 tgt_mask: Optional[tf.Tensor] = None,
@@ -233,7 +235,7 @@ class TransformerDecoderLayer(TransformerBaseLayer):
             tgt = self.forward_ffn_before(tgt, training=t)
 
         tgt = self.forward_self_attn(tgt, training=t,
-                     attn_mask=tgt_mask,
+                     attention_mask=tgt_mask,
                      key_padding_mask=tgt_key_padding_mask,
                      pos=query_pos)
 

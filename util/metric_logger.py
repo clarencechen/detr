@@ -70,7 +70,7 @@ class MetricLogger(object):
 
     def update(self, **kwargs):
         for k, v in kwargs.items():
-            if isinstance(v, tf.Tensor):
+            if tf.is_tensor(v):
                 assert tf.size(v) == 1
                 v = v.numpy()[0]
             assert isinstance(v, (float, int))

@@ -28,11 +28,14 @@ def _backbone(self, in_tensor: tf.Tensor, name: str, train_backbone: bool, retur
     return [encoder_model.get_layer(name).output for name in out_layers]
 
 
-def build_backbone(args, in_tensor: tf.Tensor):
+def build_backbone(args, in_tensor: tf.Tensor, in_masks: tf.Tensor):
     position_embedding = build_position_encoding(args)
     train_backbone = args.lr_backbone > 0
     return_interm_layers = args.masks
-    backbone_outputs = _backbone(in_tensor, args.backbone, train_backbone, return_interm_layers)
-    pos_outputs = [tf.cast(position_embedding(t), t.dtype) for t in backbone_outputs]
-    model = Model(inputs=in_tensor, outputs=(backbone_outputs, pos_outputs))
+    out_features = _backbone(in_tensor, args.backbone, train_backbone, return_interm_layers)
+    out_pos = [tf.cast(position_embedding(t), t.dtype) for t in out_features]
+    out_masks = tf.expand_dims(in_masks, -1)
+    out_masks = tf.image.resize(in_masks, out_features[-1].shape[-3:-1], mode='nearest')
+    out_masks = tf.squeeze(in_masks, -1)
+    model = Model(inputs=in_tensor, outputs=(out_features, out_pos, out_masks))
     return model
