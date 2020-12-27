@@ -110,7 +110,7 @@ class SetCriterion(Model):
         self.losses = losses
 
     @tf.function
-    def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
+    def loss_labels(self, outputs, targets, indices, num_boxes):
         """Classification loss (NLL)
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
         """
@@ -130,12 +130,13 @@ class SetCriterion(Model):
         return losses
 
     @tf.function
-    def loss_class_error(self, outputs, targets, indices, num_boxes):
+    def loss_class_error(self, outputs, targets, indices, num_boxes, log=True):
         """TargetbBox classification error
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
         """
-
         assert 'pred_logits' in outputs
+        if not log:
+            return {}
 
         permuted_logits = _get_src_permutation(outputs['pred_logits'], indices)
         target_classes_o = targets['labels']
@@ -243,7 +244,7 @@ class SetCriterion(Model):
         # Gather valid targets from padded batch
         valid_entries = tf.where(targets['area'] > 0)
         valid_targets = {k: tf.gather_nd(v, valid_entries) for k, v in targets.items() if k != 'area'}
-        tgt_lengths = tf.reduce_sum(targets['area'] > 0, axis=-1)
+        tgt_lengths = tf.reduce_sum(tf.cast(targets['area'] > 0, tf.int32), axis=-1)
 
         # Retrieve the matching between the outputs of the last layer and the targets
         indices = self.matcher(outputs_without_aux, valid_targets, tgt_lengths)
@@ -272,7 +273,7 @@ class SetCriterion(Model):
                         # Intermediate masks losses are too costly to compute, we ignore them.
                         continue
                     kwargs = {}
-                    if loss == 'labels':
+                    if loss == 'class_error':
                         # Logging is enabled only for the last layer
                         kwargs = {'log': False}
                     l_dict = self.get_loss(loss, aux_outputs, aux_targets, aux_indices, num_boxes, **kwargs)
