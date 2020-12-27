@@ -7,7 +7,7 @@ import tensorflow.keras.layers as layers
 import tensorflow.keras.layers.experimental.preprocessing as pp_layers
 
 from tensorflow.keras.backend import learning_phase
-from util.box_ops import box_xyxy_to_cxcywh, box_cxcywh_to_xyxy, box_area_xyxy
+from util.box_ops import box_area_xyxy
 from util.rng import make_generator
 
 @tf.function
@@ -15,63 +15,42 @@ def crop(image, target, region):
     i, j, h, w = region
     cropped_image = image[..., i:i + h, j:j + w, :]
 
-    fields = ["labels"]
-
     if "boxes" in target:
-        boxes_xyxy = box_cxcywh_to_xyxy(target["boxes"])
-        max_size = tf.tile(tf.shape(image)[-3:-1:-1], 2)
-        cropped_boxes = boxes_xyxy * max_size - tf.constant([j, i, j, i], dtype=tf.int32)
-        cropped_boxes = cropped_boxes / tf.constant([w, h, w, h], dtype=tf.float32)
-        target["boxes"] = box_xyxy_to_cxcywh(tf.clip_by_value(cropped_boxes, min=0, max=1))
-        
-        fields.append("boxes")
+        max_size = tf.tile(tf.shape(image)[-3:-1], [2])
+        cropped_boxes = target["boxes"] * max_size - tf.constant([i, j, i, j], dtype=tf.int32)
+        cropped_boxes = cropped_boxes / tf.constant([h, w, h, w], dtype=tf.float32)
+        target["boxes"] = tf.clip_by_value(cropped_boxes, min=0, max=1)
 
     if "masks" in target:
-        # FIXME should we update the area here if there are no boxes?
-        target['masks'] = target['masks'][..., i:i + h, j:j + w]
-        fields.append("masks")
+        target['masks'] = target['masks'][..., i:i + h, j:j + w, :]
 
-    # recalculate area for boxes or masks that been cropped
-    if "boxes" in target or "masks" in target:
+    if "area" in target and ("boxes" in target or "masks" in target):
         # favor boxes selection when recalculating area
         # this is compatible with previous implementation
         if "boxes" in target:
             target["area"] = tf.cast(box_area_xyxy(cropped_boxes), tf.int32)
         else:
-            target["area"] = tf.reduce_sum(tf.cast(target['masks'], tf.int32), [-2, -1])
+            target["area"] = tf.reduce_sum(tf.cast(target['masks'], tf.int32), [-3, -2])
 
     return cropped_image, target
 
 @tf.function
 def resize(image, target, min_size, max_size=None):
+    image_shape = tf.shape(image)[-3:-1]
+    ratio = min_size / tf.reduce_min(image_shape)
+    if max_size and (ratio * tf.reduce_max(image_shape) > max_size):
+        ratio = max_size / tf.reduce_max(image_shape)
+    new_shape = tf.cast(ratio * image_shape, tf.int32)
 
-    @tf.function
-    def get_size_with_aspect_ratio(image_size, min_size, max_size=None):
-        h, w = float(image_size[0]), float(image_size[1])
-        if max_size is not None:
-            min_original_size = min(h, w)
-            max_original_size = max(h, w)
-            if max_original_size / min_original_size * size > max_size:
-                size = float(round(max_size * min_original_size / max_original_size))
-
-        if (w <= h and w == size) or (h <= w and h == size):
-            return h, w
-        return max(size, int(size * h / w)), max(int(size * w / h), size)
-
-    h, w = tf.shape(image)[-3], tf.shape(image)[-2]
-    nh, nw = get_size_with_aspect_ratio((h, w), size, max_size)
-    rescaled_image = tf.image.resize(image, [nh, nw], method='bilinear')
-
-    if target is None:
-        return rescaled_image, None
+    rescaled_image = tf.image.resize(image, new_shape, method='bilinear')
 
     if "masks" in target:
-        rescaled_masks = tf.transpose(target['masks'], [0, 2, 3, 1])
-        rescaled_masks = tf.image.resize(rescaled_masks, [nh, nw], method='nearest')
-        target['masks'] = tf.transpose(rescaled_masks, [0, 3, 1, 2])
+        rescaled_masks = tf.image.resize(target['masks'], new_shape, method='nearest')
+        target['masks'] = rescaled_masks
 
-    rescaled_area = (target["area"] * nh * nw)/(h * w)
-    target["area"] = rescaled_area
+    if "area" in target:
+        rescaled_area = (target["area"] * tf.reduce_prod(new_shape)) / tf.reduce_prod(image_shape)
+        target["area"] = rescaled_area
 
     return rescaled_image, target
 
@@ -110,24 +89,37 @@ class RandomFlipExtd(pp_layers.PreprocessingLayer):
 
         @tf.function
         def flip(img, tgt):
-            seeds, bs = self.rng.make_seeds(2), tf.shape(tgt['boxes'])[0]
-            flipped_image, flipped_masks, flipped_boxes = img, tf.transpose(tgt['masks'], [0, 2, 3, 1]), tgt['boxes']
-
+            seeds = self.rng.make_seeds(2)
+            flipped_image = img
             if self.horizontal:
                 flipped_image = tf.image.stateless_random_flip_left_right(flipped_image, seeds[:, 0])
-                flipped_masks = tf.image.stateless_random_flip_left_right(flipped_masks, seeds[:, 0])
-                flips = tf.random.stateless_uniform([bs, 1], seeds[:, 0], 0, 1, dtype=tf.float32)
-                flips = tf.stack([tf.round(flips)] + 3 * [tf.zeros_like(flips)], axis=-1)
-                flipped_boxes = flipped_boxes * (1 - 2 * flips) + flips
-
             if self.vertical:
                 flipped_image = tf.image.stateless_random_flip_up_down(flipped_image, seeds[:, 1])
-                flipped_masks = tf.image.stateless_random_flip_up_down(flipped_masks, seeds[:, 1])
-                flips = tf.random.stateless_uniform([bs, 1], seeds[:, 1], 0, 1, dtype=tf.float32)
-                flips = tf.stack([tf.zeros_like(flips), tf.round(flips)] + 2 * [tf.zeros_like(flips)], axis=-1)
-                flipped_boxes = flipped_boxes * (1 - 2 * flips) + flips
-                
-            img, tgt['masks'], tgt['boxes'] = flipped_img, tf.transpose(flipped_masks, [0, 3, 1, 2]), flipped_boxes
+
+            if "boxes" in target:
+                flipped_boxes, bs = tgt['boxes'], tf.shape(tgt['boxes'])[0]
+                if self.horizontal:
+                    flips = tf.random.stateless_uniform([bs], seeds[:, 0], 0, 1, dtype=tf.float32)
+                    flips = tf.round(flips)
+                    left = (1 - flipped_boxes[..., 3]) * flips + (1 - flips) * flipped_boxes[..., 1]
+                    right = (1 - flipped_boxes[..., 1]) * flips + (1 - flips) * flipped_boxes[..., 3]
+                    flipped_boxes = tf.stack([flipped_boxes[..., 0], left, flipped_boxes[..., 2], right], axis=-1)
+                if self.vertical:
+                    flips = tf.random.stateless_uniform([bs], seeds[:, 1], 0, 1, dtype=tf.float32)
+                    flips = tf.round(flips)
+                    top = (1 - flipped_boxes[..., 2]) * flips + (1 - flips) * flipped_boxes[..., 0]
+                    btm = (1 - flipped_boxes[..., 0]) * flips + (1 - flips) * flipped_boxes[..., 2]
+                    flipped_boxes = tf.stack([top, flipped_boxes[..., 1], btm, flipped_boxes[..., 3]], axis=-1)
+                tgt['boxes'] = flipped_boxes
+
+            if "masks" in target:
+                flipped_masks = tgt['masks']
+                if self.horizontal:
+                    flipped_masks = tf.image.stateless_random_flip_left_right(flipped_masks, seeds[:, 0])
+                if self.vertical:
+                    flipped_masks = tf.image.stateless_random_flip_up_down(flipped_masks, seeds[:, 1])
+                tgt['masks'] = flipped_masks
+    
             return img, tgt
 
         img, tgt = tf.cond(training, flip(img, tgt), lambda: img, tgt)

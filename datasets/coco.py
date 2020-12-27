@@ -4,155 +4,97 @@ COCO dataset which returns image_id for evaluation.
 
 Mostly copy-paste from https://github.com/pytorch/vision/blob/13b35ff/references/detection/coco_utils.py
 """
-from pathlib import Path
+import tensorflow as tf
+import tensorflow_datasets as tfds
+import tensorflow.keras.layers.experimental.preprocessing as pp_layers
 
-import torch
-import torch.utils.data
-import torchvision
-from pycocotools import mask as coco_mask
+from tensorflow.data.experimental import AUTOTUNE
+from utils.box_ops import box_xyxy_to_cxcywh
 
 import datasets.transforms as T
 
 
-class CocoDetection(torchvision.datasets.CocoDetection):
-    def __init__(self, img_folder, ann_file, transforms, return_masks):
-        super(CocoDetection, self).__init__(img_folder, ann_file)
-        self._transforms = transforms
-        self.prepare = ConvertCocoPolysToMask(return_masks)
-
-    def __getitem__(self, idx):
-        img, target = super(CocoDetection, self).__getitem__(idx)
-        image_id = self.ids[idx]
-        target = {'image_id': image_id, 'annotations': target}
-        img, target = self.prepare(img, target)
-        if self._transforms is not None:
-            img, target = self._transforms(img, target)
-        return img, target
-
-
-def convert_coco_poly_to_mask(segmentations, height, width):
-    masks = []
-    for polygons in segmentations:
-        rles = coco_mask.frPyObjects(polygons, height, width)
-        mask = coco_mask.decode(rles)
-        if len(mask.shape) < 3:
-            mask = mask[..., None]
-        mask = torch.as_tensor(mask, dtype=torch.uint8)
-        mask = mask.any(dim=2)
-        masks.append(mask)
-    if masks:
-        masks = torch.stack(masks, dim=0)
-    else:
-        masks = torch.zeros((0, height, width), dtype=torch.uint8)
-    return masks
-
-
-class ConvertCocoPolysToMask(object):
-    def __init__(self, return_masks=False):
+class CocoDataset:
+    def __init__(self, ds_name, image_set, seed=None, return_masks=True):
+        self.ds_name = ds_name + ('/panoptic' if return_masks else '')
+        self.image_set = image_set
+        self.seed = seed
+        self.target_key = 'panoptic_objects' if return_masks else 'objects'
+        self.transforms = self.make_coco_transforms()
         self.return_masks = return_masks
 
-    def __call__(self, image, target):
-        w, h = image.size
+        def make_coco_transforms(self):
+            normalize = pp_layers.Normalization(dtype=tf.float32, mean=[0.485, 0.456, 0.406], variance=[0.229, 0.224, 0.225])
+            rescale = pp_layers.Rescaling(scale=1./255)
+            resize_800 = tf.keras.layers.LambdaLayer(lambda image, target: T.resize(image, target, 800, max_size=1333))
 
-        image_id = target["image_id"]
-        image_id = torch.tensor([image_id])
+            random_flip = T.RandomFlipExtd(mode='horizontal', seed=self.seed)
+            crop = T.RandomCropExtd(min_size=384, max_size=600, seed=self.seed)
+            resize_crop = T.RandomResizeExtd([400, 500, 600], seed=self.seed)
+            crop_cond = T.RandomSelect(tf.keras.Sequential(resize_crop, crop), seed=self.seed)
+            resize_scales = T.RandomResizeExtd([480 + 32 * i for i in range(11)], seed=self.seed)
 
-        anno = target["annotations"]
+            def train_transform(image, targets):
+                image, targets = crop_cond(random_flip(image, targets))
+                image, targets = resize_scales(image, targets)
+                return normalize(rescale(image)), targets
 
-        anno = [obj for obj in anno if 'iscrowd' not in obj or obj['iscrowd'] == 0]
+            def val_transform(image, targets):
+                image, targets = resize_800(image, targets)
+                return normalize(rescale(image)), targets
 
-        boxes = [obj["bbox"] for obj in anno]
-        # guard against no boxes via resizing
-        boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
-        boxes[:, 2:] += boxes[:, :2]
-        boxes[:, 0::2].clamp_(min=0, max=w)
-        boxes[:, 1::2].clamp_(min=0, max=h)
+            if self.image_set == 'train':
+                return train_transform
+            elif self.image_set == 'validation':
+                return val_transform
+            raise ValueError(f'unknown {image_set}')
 
-        classes = [obj["category_id"] for obj in anno]
-        classes = torch.tensor(classes, dtype=torch.int64)
+    def format_box_masks(self, img, tgt):
+        masks_bnhw = tf.transpose(tgt['masks'], [0, 3, 1, 2])
+        bbox_cycxhw = box_xyxy_to_cxcywh(tgt['boxes'])
+        tgt['boxes'] = tf.stack([bbox_cycxhw[..., 1], bbox_cycxhw[..., 0],
+                                 bbox_cycxhw[..., 3], bbox_cycxhw[..., 2]], axis=-1)
+        tgt['masks'] = masks_bnhw
+        img_pad_mask = tf.ones(tf.shape(img)[-3:-1], dtype=tf.int32)
+        return img, img_pad_mask, tgt
 
+    def decode_example(self, ex):
+        img = tf.io.decode_img(ex['image'], channels=3)
+        targets = {
+            'image_id': ex['image/id'],
+            'area': ex[self.target_key]['area'],
+            'boxes': ex[self.target_key]['bbox'],
+            'labels': ex[self.target_key]['label']
+        }
         if self.return_masks:
-            segmentations = [obj["segmentation"] for obj in anno]
-            masks = convert_coco_poly_to_mask(segmentations, h, w)
+            seg_map_raw = tf.cast(tf.io.decode_img(ex['panoptic_image'], channels=3), tf.int32)
+            seg_map_id = seg_map_raw[..., 0] + 256 * seg_map_raw[..., 1] + 65536 * seg_map_raw[..., 2]
+            seg_map_id = tf.expand_dims(seg_map_id, [-1])
+            seg_id_list = tf.expand_dims(ex[self.target_key]['id'], [-3, -2])
+            targets['masks'] = tf.cast(seg_id_map == seg_id_list, tf.int32)
+        return img, targets
 
-        keypoints = None
-        if anno and "keypoints" in anno[0]:
-            keypoints = [obj["keypoints"] for obj in anno]
-            keypoints = torch.as_tensor(keypoints, dtype=torch.float32)
-            num_keypoints = keypoints.shape[0]
-            if num_keypoints:
-                keypoints = keypoints.view(num_keypoints, -1, 3)
-
-        keep = (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 2] > boxes[:, 0])
-        boxes = boxes[keep]
-        classes = classes[keep]
+    def dataset(self, batch_size, num_workers):
+        decoder_dict = {'image': tfds.decode.SkipDecoding()}
         if self.return_masks:
-            masks = masks[keep]
-        if keypoints is not None:
-            keypoints = keypoints[keep]
+            decoder_dict['panoptic_image'] = tfds.decode.SkipDecoding()
 
-        target = {}
-        target["boxes"] = boxes
-        target["labels"] = classes
-        if self.return_masks:
-            target["masks"] = masks
-        target["image_id"] = image_id
-        if keypoints is not None:
-            target["keypoints"] = keypoints
+        ds = tfds.load(self.load_string, split=self.image_set, batch_size=1,
+                       shuffle_files=(self.image_set == 'train'),
+                       decoders=decoder_dict, read_config=tfds.ReadConfig(
+                        try_autocache=False, shuffle_seed=(self.seed + 1), skip_prefetch=True
+                       ), try_gcs=True)
+        if self.image_set == 'train':
+            ds = ds.shuffle(seed=self.seed, buffer_size=AUTOTUNE)
+        ds = ds.map(self.decode_example, num_parallel_calls=num_workers)
+        if self.transforms is not None:
+            ds = ds.map(self.transforms, num_parallel_calls=num_workers)
+        ds = ds.map(self.format_box_masks, num_parallel_calls=num_workers)
+        ds = ds.padded_batch(batch_size, drop_remainder=True)
+        ds = ds.prefetch(buffer_size=AUTOTUNE)
 
-        # for conversion to coco api
-        area = torch.tensor([obj["area"] for obj in anno])
-        iscrowd = torch.tensor([obj["iscrowd"] if "iscrowd" in obj else 0 for obj in anno])
-        target["area"] = area[keep]
-        target["iscrowd"] = iscrowd[keep]
-
-        target["orig_size"] = torch.as_tensor([int(h), int(w)])
-        target["size"] = torch.as_tensor([int(h), int(w)])
-
-        return image, target
+        return ds
 
 
-def make_coco_transforms(image_set):
-
-    normalize = T.Compose([
-        T.ToTensor(),
-        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ])
-
-    scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
-
-    if image_set == 'train':
-        return T.Compose([
-            T.RandomHorizontalFlip(),
-            T.RandomSelect(
-                T.RandomResize(scales, max_size=1333),
-                T.Compose([
-                    T.RandomResize([400, 500, 600]),
-                    T.RandomSizeCrop(384, 600),
-                    T.RandomResize(scales, max_size=1333),
-                ])
-            ),
-            normalize,
-        ])
-
-    if image_set == 'val':
-        return T.Compose([
-            T.RandomResize([800], max_size=1333),
-            normalize,
-        ])
-
-    raise ValueError(f'unknown {image_set}')
-
-
-def build(image_set, args):
-    root = Path(args.coco_path)
-    assert root.exists(), f'provided COCO path {root} does not exist'
-    mode = 'instances'
-    PATHS = {
-        "train": (root / "train2017", root / "annotations" / f'{mode}_train2017.json'),
-        "val": (root / "val2017", root / "annotations" / f'{mode}_val2017.json'),
-    }
-
-    img_folder, ann_file = PATHS[image_set]
-    dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(image_set), return_masks=args.masks)
-    return dataset
+def build(ds_name, image_set, args, seed):
+    return CocoDataset(ds_name, image_set, seed=seed, return_masks=args.masks)
