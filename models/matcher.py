@@ -74,7 +74,7 @@ class HungarianMatcher:
 
         indices = [linear_sum_assignment(c[i]) for i, c in enumerate(tf.split(C, lengths, axis=-1))]
 
-        return [tf.Variable(i, dtype=tf.int64, trainable=False), tf.Variable(j, dtype=tf.int64, trainable=False) for i, j in indices]
+        return [tf.constant(i, dtype=tf.int32), tf.constant(j, dtype=tf.int32) for i, j in indices]
 
 
 def build_matcher(args):
