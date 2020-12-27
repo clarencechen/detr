@@ -10,7 +10,6 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_addons as tfa
 
-import datasets
 import util.misc as utils
 from datasets import build_dataset
 from engine import evaluate, train_one_epoch
