@@ -7,12 +7,12 @@ import time
 from pathlib import Path
 
 import numpy as np
-import torch
-from torch.utils.data import DataLoader, DistributedSampler
+import tensorflow as tf
+import tensorflow_addons as tfa
 
 import datasets
 import util.misc as utils
-from datasets import build_dataset, get_coco_api_from_dataset
+from datasets import build_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
 
@@ -96,6 +96,10 @@ def get_args_parser():
     parser.add_argument('--num_workers', default=2, type=int)
 
     # distributed training parameters
+    parser.add_argument('--use_tpu', action='store_false',
+                        help='use available tpu pods for training')
+    parser.add_argument('--num_gpus', default=1, type=int,
+                        help='number of available gpu devices to train on')
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
@@ -103,125 +107,88 @@ def get_args_parser():
 
 
 def main(args):
-    utils.init_distributed_mode(args)
+    strategy = utils.find_strategy_single_worker(args)
     print("git:\n  {}\n".format(utils.get_sha()))
 
     if args.frozen_weights is not None:
         assert args.masks, "Frozen training is meant for segmentation only"
     print(args)
 
-    device = torch.device(args.device)
-
     # fix the seed for reproducibility
     seed = args.seed + utils.get_rank()
-    torch.manual_seed(seed)
+    tf.random.set_seed(seed)
     np.random.seed(seed)
-    random.seed(seed)
 
-    model, criterion, postprocessors = build_model(args)
-    model.to(device)
+    backbone, detector, criterion, postprocessors = build_model(args, strategy)
 
-    model_without_ddp = model
-    if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-        model_without_ddp = model.module
-    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print('number of params:', n_parameters)
+    dataset_train = build_dataset(image_set='train', args=args, seed=seed)
+    dataset_val = build_dataset(image_set='validation', args=args, seed=seed)
 
-    param_dicts = [
-        {"params": [p for n, p in model_without_ddp.named_parameters() if "backbone" not in n and p.requires_grad]},
-        {
-            "params": [p for n, p in model_without_ddp.named_parameters() if "backbone" in n and p.requires_grad],
-            "lr": args.lr_backbone,
-        },
-    ]
-    optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
-                                  weight_decay=args.weight_decay)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
+    data_loader_train = dataset_train.dataset(batch_size=args.batch_size * strategy.num_replicas_in_sync,
+                                              num_workers=args.num_workers)
+    data_loader_val = dataset_val.dataset(batch_size=args.batch_size * strategy.num_replicas_in_sync,
+                                          num_workers=args.num_workers)
+    data_iter_train = iter(strategy.experimental_distribute_dataset(data_loader_train))
+    data_iter_val = iter(strategy.experimental_distribute_dataset(data_loader_val))
+    num_steps_per_epoch = len(data_iter_train)
 
-    dataset_train = build_dataset(image_set='train', args=args)
-    dataset_val = build_dataset(image_set='val', args=args)
+    backbone.summary()
+    detector.summary()
 
-    if args.distributed:
-        sampler_train = DistributedSampler(dataset_train)
-        sampler_val = DistributedSampler(dataset_val, shuffle=False)
-    else:
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
-        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+    backbone_scheduler = optimizers.schedules.ExponentialDecay(args.lr_backbone, args.lr_drop * num_steps_per_epoch, 0.1, staircase=True)
+    detector_scheduler = optimizers.schedules.ExponentialDecay(args.lr, args.lr_drop * num_steps_per_epoch, 0.1, staircase=True)
+    backbone_optimizer = tfa.optimizers.AdamW(learning_rate=backbone_scheduler, weight_decay=args.weight_decay)
+    detector_optimizer = tfa.optimizers.AdamW(learning_rate=detector_scheduler, weight_decay=args.weight_decay)
+    optimizer = (backbone_optimizer, detector_optimizer)
+    model = (backbone, detector)
 
-    batch_sampler_train = torch.utils.data.BatchSampler(
-        sampler_train, args.batch_size, drop_last=True)
-
-    data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
-                                   collate_fn=utils.collate_fn, num_workers=args.num_workers)
-    data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
-                                 drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
-
-    if args.dataset_file == "coco_panoptic":
-        # We also evaluate AP during panoptic training, on original coco DS
-        coco_val = datasets.coco.build("val", args)
-        base_ds = get_coco_api_from_dataset(coco_val)
-    else:
-        base_ds = get_coco_api_from_dataset(dataset_val)
-
-    if args.frozen_weights is not None:
-        checkpoint = torch.load(args.frozen_weights, map_location='cpu')
-        model_without_ddp.detr.load_state_dict(checkpoint['model'])
+    # if args.frozen_weights is not None:
+    #    checkpoint = torch.load(args.frozen_weights, map_location='cpu')
 
     output_dir = Path(args.output_dir)
     if args.resume:
         if args.resume.startswith('https'):
-            checkpoint = torch.hub.load_state_dict_from_url(
-                args.resume, map_location='cpu', check_hash=True)
+            raise NotImplementedError, 'Loading hub checkpoints is not supported yet.'
         else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
-        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-            args.start_epoch = checkpoint['epoch'] + 1
+            checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
+            manager = tf.train.CheckpointManager(checkpoint, args.resume, max_to_keep=1)
+        if manager.latest_checkpoint:
+            checkpoint.restore(manager.latest_checkpoint).expect_partial()
+            args.start_epoch = int(manager.latest_checkpoint.split('-')[-1])
+            del manager, checkpoint
+        else:
+            raise FileNotFoundError, f'Could not find checkpoint at {args.resume}'
 
     if args.eval:
-        test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
-                                              data_loader_val, base_ds, device, args.output_dir)
-        if args.output_dir:
-            utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
+        test_stats, _ = evaluate(model, criterion, postprocessors,
+                                              data_iter_val, strategy, args.output_dir)
         return
 
     print("Start training")
     start_time = time.time()
+    if args.output_dir:
+        save_checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
+        save_manager = tf.train.CheckpointManager(save_checkpoint, output_dir / 'checkpoint', max_to_keep=1)
     for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
-            sampler_train.set_epoch(epoch)
         train_stats = train_one_epoch(
-            model, criterion, data_loader_train, optimizer, device, epoch,
+            model, criterion, data_iter_train, optimizer, strategy, epoch,
             args.clip_max_norm)
-        lr_scheduler.step()
         if args.output_dir:
-            checkpoint_paths = [output_dir / 'checkpoint.pth']
+            save_manager.save(checkpoint_number=epoch + 1)
             # extra checkpoint before LR drop and every 100 epochs
             if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % 100 == 0:
-                checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
-            for checkpoint_path in checkpoint_paths:
-                utils.save_on_master({
-                    'model': model_without_ddp.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'lr_scheduler': lr_scheduler.state_dict(),
-                    'epoch': epoch,
-                    'args': args,
-                }, checkpoint_path)
+                save_checkpoint.save(output_dir / f'checkpoint{epoch:04}')
 
         test_stats, coco_evaluator = evaluate(
-            model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
+            model, criterion, postprocessors, data_iter_val, args.output_dir
         )
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      **{f'test_{k}': v for k, v in test_stats.items()},
-                     'epoch': epoch,
-                     'n_parameters': n_parameters}
+                     'epoch': epoch}
 
-        if args.output_dir and utils.is_main_process():
-            with (output_dir / "log.txt").open("a") as f:
+        if args.output_dir:
+            with tf.io.gfile.GFile(output_dir / "log.txt", mode="a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
             # for evaluation logs
