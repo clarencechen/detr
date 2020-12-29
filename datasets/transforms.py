@@ -78,7 +78,7 @@ class RandomCropExtd(pp_layers.PreprocessingLayer):
 
 class RandomFlipExtd(pp_layers.PreprocessingLayer):
     def __init__(self, horizontal=True, vertical=False, seed=None, **kwargs):
-        super(FlipExtd, self).__init__(**kwargs)
+        super(RandomFlipExtd, self).__init__(**kwargs)
         self.horizontal = horizontal
         self.vertical = vertical
         self.rng = make_generator(seed=seed)

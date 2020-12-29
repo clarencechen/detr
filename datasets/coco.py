@@ -9,46 +9,49 @@ import tensorflow_datasets as tfds
 import tensorflow.keras.layers.experimental.preprocessing as pp_layers
 
 from tensorflow.data.experimental import AUTOTUNE
-from utils.box_ops import box_xyxy_to_cxcywh
+from util.box_ops import box_xyxy_to_cxcywh
 
 import datasets.transforms as T
 
 
 class CocoDataset:
+    # Implementation of Dataset Pipeline
     def __init__(self, ds_name, image_set, seed=None, return_masks=True, max_size=1333):
         self.ds_name = ds_name + ('/panoptic' if return_masks else '')
         self.image_set = image_set
         self.seed = seed
         self.target_key = 'panoptic_objects' if return_masks else 'objects'
-        self.transforms = self.make_coco_transforms()
+        self.transforms = self.make_coco_transforms(image_set)
         self.return_masks = return_masks
         self.max_size = max_size
 
-        def make_coco_transforms(self):
-            normalize = pp_layers.Normalization(dtype=tf.float32, mean=[0.485, 0.456, 0.406], variance=[0.229, 0.224, 0.225])
-            rescale = pp_layers.Rescaling(scale=1./255)
-            resize_800 = tf.keras.layers.LambdaLayer(lambda image, target: T.resize(image, target, 800, max_size=self.max_size))
 
-            random_flip = T.RandomFlipExtd(mode='horizontal', seed=self.seed)
-            crop = T.RandomCropExtd(min_size=384, max_size=600, seed=self.seed)
-            resize_crop = T.RandomResizeExtd([400, 500, 600], seed=self.seed)
-            crop_cond = T.RandomSelect(tf.keras.Sequential(resize_crop, crop), seed=self.seed)
-            resize_scales = T.RandomResizeExtd([480 + 32 * i for i in range(11)], seed=self.seed)
+    def make_coco_transforms(self, image_set):
+        normalize = pp_layers.Normalization(dtype=tf.float32, mean=[0.485, 0.456, 0.406], variance=[0.229, 0.224, 0.225])
+        rescale = pp_layers.Rescaling(scale=1./255)
+        resize_800 = tf.keras.layers.Lambda(lambda image, target: T.resize(image, target, 800, max_size=self.max_size))
 
-            def train_transform(image, targets):
-                image, targets = crop_cond(random_flip(image, targets))
-                image, targets = resize_scales(image, targets)
-                return normalize(rescale(image)), targets
+        random_flip = T.RandomFlipExtd(seed=self.seed)
+        crop = T.RandomCropExtd(min_size=384, max_size=600, seed=self.seed)
+        resize_crop = T.RandomResizeExtd([400, 500, 600], seed=self.seed)
+        crop_cond = T.RandomSelect(tf.keras.Sequential(resize_crop, crop), seed=self.seed)
+        resize_scales = T.RandomResizeExtd([480 + 32 * i for i in range(11)], seed=self.seed)
 
-            def val_transform(image, targets):
-                image, targets = resize_800(image, targets)
-                return normalize(rescale(image)), targets
+        def train_transform(image, targets):
+            image, targets = crop_cond(random_flip(image, targets))
+            image, targets = resize_scales(image, targets)
+            return normalize(rescale(image)), targets
 
-            if self.image_set == 'train':
-                return train_transform
-            elif self.image_set == 'validation':
-                return val_transform
-            raise ValueError(f'unknown {image_set}')
+        def val_transform(image, targets):
+            image, targets = resize_800(image, targets)
+            return normalize(rescale(image)), targets
+
+        if image_set == 'train':
+            return train_transform
+        elif image_set == 'validation':
+            return val_transform
+        raise ValueError(f'unknown {image_set}')
+
 
     def format_box_masks(self, img, tgt):
         masks_bnhw = tf.transpose(tgt['masks'], [0, 3, 1, 2])

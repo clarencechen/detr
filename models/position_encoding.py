@@ -38,24 +38,24 @@ class PositionEmbeddingSine(layers.Layer):
         self.height, self.width = input_shape[-2:] if K.image_data_format() == 'channels_first' else input_shape[-3:-1]
 
     def call(self, inputs):
-        y_range = tf.range(height, dtype=tf.float32)
-        x_range = tf.range(width, dtype=tf.float32)
-        y_embed, x_embed = tf.expand_dims(tf.meshgrid(y_range, x_range), 0)
+        y_range = tf.range(self.height, dtype=tf.float32)
+        x_range = tf.range(self.width, dtype=tf.float32)
+        y_embed, x_embed = tf.meshgrid(y_range, x_range)
         if self.normalize:
             eps = 1e-6
-            y_embed = y_embed / (y_embed[:, -1:, :] + eps) * self.scale
-            x_embed = x_embed / (x_embed[:, :, -1:] + eps) * self.scale
+            y_embed = y_embed / (y_embed[-1:, :] + eps) * self.scale
+            x_embed = x_embed / (x_embed[:, -1:] + eps) * self.scale
 
         dim_t = tf.range(self.num_pos_feats, dtype=tf.float32)
         dim_t = self.temperature ** (2 * (dim_t // 2) / self.num_pos_feats)
 
         pos_x = tf.expand_dims(x_embed, -1) / dim_t
         pos_y = tf.expand_dims(y_embed, -1) / dim_t
-        pos_x = tf.reshape(tf.stack([tf.sin(pos_x[:, :, :, 0::2]), tf.cos(pos_x[:, :, :, 1::2])], 4), pos_x.shape[:3] + [-1])
-        pos_y = tf.reshape(tf.stack([tf.sin(pos_y[:, :, :, 0::2]), tf.cos(pos_y[:, :, :, 1::2])], 4), pos_y.shape[:3] + [-1])
-        pos = tf.concatenate([pos_y, pos_x], 3)
+        pos = tf.concat([tf.sin(pos_x[:, :, 0::2]), tf.cos(pos_x[:, :, 1::2]),
+                              tf.sin(pos_y[:, :, 0::2]), tf.cos(pos_y[:, :, 1::2])], -1)
         if K.image_data_format() == 'channels_first':
-            pos = tf.transpose(pos, [0, 3, 1, 2])
+            pos = tf.transpose(pos, [2, 0, 1])
+        pos = tf.expand_dims(pos, 0)
         return pos
 
 
@@ -83,7 +83,7 @@ class PositionEmbeddingLearned(layers.Layer):
 
     def call(self, inputs):
         i, j = tf.range(self.width), tf.range(self.height)
-        pos = tf.concatenate([
+        pos = tf.concat([
             tf.stack([self.col_embed] * self.height, 0),
             tf.stack([self.row_embed] * self.width, 1),
         ], dim=-1)

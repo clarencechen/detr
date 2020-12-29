@@ -41,7 +41,7 @@ class MaskHeadSmallConv:
         return tf.concat([tensor] * int(length), 0)
 
     def __call__(self, x: tf.Tensor, bbox_mask: tf.Tensor, fpns: List[tf.Tensor]):
-        x = tf.concat([tf.stack([x] * int(bbox_mask.shape[1]), 1), bbox_mask], -1)
+        x = tf.concat([tf.stack([x] * bbox_mask.shape[1], 1), bbox_mask], -1)
         x = tf.reshape(x, [-1] + x.shape[-3:])
 
         x = layers.ReLU()(self.gn1(self.lay1(x)))
@@ -67,31 +67,6 @@ class MaskHeadSmallConv:
 
         x = self.out_lay(x)
         return x
-
-
-class MHAttentionMap:
-    """This is a 2D attention module, which only returns the attention softmax (no multiplication by value)"""
-
-    def __init__(self, hidden_dim, num_heads, dropout=0.0, use_bias=True):
-        self.num_heads = num_heads
-        self.hidden_dim = hidden_dim
-        self.dropout = layers.Dropout(dropout)
-
-        self.q_linear = layers.Dense(hidden_dim, use_bias=use_bias)
-        self.k_linear = layers.Conv2D(hidden_dim, 1, use_bias=use_bias)
-
-        self.normalize_fact = float(hidden_dim / self.num_heads) ** -0.5
-
-    def __call__(self, q: tf.Tensor, k: tf.Tensor, training: bool, mask: Optional[tf.Tensor] = None):
-        q, k = self.q_linear(q), self.k_linear(k)
-        qh = tf.reshape(q, q.shape[:2] + [self.num_heads, self.hidden_dim // self.num_heads])
-        kh = tf.reshape(k, k.shape[:3] + [self.num_heads, self.hidden_dim // self.num_heads])
-        weights = tf.einsum("bqnc,bhwnc->bqhwn", qh * self.normalize_fact, kh)
-
-        if mask is not None:
-            weights = tf.where(tf.reshape(mask, [-1, 1] + mask.shape[1:] + [1]), -np.inf, weights)
-        weights = self.dropout(tf.nn.softmax(weights, axis=[2, 3]), training=training)
-        return weights
 
 
 @tf.function

@@ -9,7 +9,7 @@ from tensorflow.keras import Model
 from .position_encoding import build_position_encoding
 
 
-def _backbone(self, in_tensor: tf.Tensor, name: str, train_backbone: bool, return_interm_layers: bool):
+def _backbone(in_tensor: tf.Tensor, name: str, train_backbone: bool, return_interm_layers: bool):
     """Returns outputs of ResNet backbone with frozen BatchNorm."""
 
     backbone = getattr(applications, name)(weights='imagenet', include_top=False, input_tensor=in_tensor)
@@ -25,17 +25,16 @@ def _backbone(self, in_tensor: tf.Tensor, name: str, train_backbone: bool, retur
         out_layers = ['conv2_block3_out', 'conv3_block4_out', 'conv4_block23_out', 'conv5_block3_out']
     else:
         out_layers = ['conv5_block3_out']
-    return [encoder_model.get_layer(name).output for name in out_layers]
+    return [backbone.get_layer(name).output for name in out_layers]
 
 
 def build_backbone(args, in_tensor: tf.Tensor, in_masks: tf.Tensor):
     position_embedding = build_position_encoding(args)
     train_backbone = args.lr_backbone > 0
-    return_interm_layers = args.masks
-    out_features = _backbone(in_tensor, args.backbone, train_backbone, return_interm_layers)
+    out_features = _backbone(in_tensor, args.backbone, train_backbone, args.masks)
     out_pos = [tf.cast(position_embedding(t), t.dtype) for t in out_features]
     out_masks = tf.expand_dims(in_masks, -1)
-    out_masks = tf.image.resize(in_masks, out_features[-1].shape[-3:-1], mode='nearest')
-    out_masks = tf.squeeze(in_masks, -1)
-    model = Model(inputs=in_tensor, outputs=(out_features, out_pos, out_masks))
-    return model
+    out_masks = tf.image.resize(out_masks, out_features[-1].shape[-3:-1], method='nearest')
+    out_masks = tf.squeeze(out_masks, -1)
+    model = Model(inputs=(in_tensor, in_masks), outputs=(out_features, out_pos, out_masks))
+    return model, (out_features, out_pos, out_masks)

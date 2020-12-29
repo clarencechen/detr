@@ -31,7 +31,7 @@ def get_args_parser():
     parser.add_argument('--frozen_weights', type=str, default=None,
                         help="Path to the pretrained model. If set, only the mask head will be trained")
     # * Backbone
-    parser.add_argument('--backbone', default='resnet50', type=str,
+    parser.add_argument('--backbone', default='ResNet50', type=str,
                         help="Name of the convolutional backbone to use")
     parser.add_argument('--max_size', default=1280, type=int,
                         help="Maximum resolution to pad images to for training")
@@ -134,8 +134,8 @@ def main(args):
     backbone.summary()
     detector.summary()
 
-    backbone_scheduler = optimizers.schedules.ExponentialDecay(args.lr_backbone, args.lr_drop * num_steps_per_epoch, 0.1, staircase=True)
-    detector_scheduler = optimizers.schedules.ExponentialDecay(args.lr, args.lr_drop * num_steps_per_epoch, 0.1, staircase=True)
+    backbone_scheduler = tf.keras.optimizers.schedules.ExponentialDecay(args.lr_backbone, args.lr_drop * num_steps_per_epoch, 0.1, staircase=True)
+    detector_scheduler = tf.keras.optimizers.schedules.ExponentialDecay(args.lr, args.lr_drop * num_steps_per_epoch, 0.1, staircase=True)
     backbone_optimizer = tfa.optimizers.AdamW(learning_rate=backbone_scheduler, weight_decay=args.weight_decay)
     detector_optimizer = tfa.optimizers.AdamW(learning_rate=detector_scheduler, weight_decay=args.weight_decay)
     optimizer = (backbone_optimizer, detector_optimizer)
@@ -147,7 +147,7 @@ def main(args):
     output_dir = Path(args.output_dir)
     if args.resume:
         if args.resume.startswith('https'):
-            raise NotImplementedError, 'Loading hub checkpoints is not supported yet.'
+            raise NotImplementedError('Loading hub checkpoints is not supported yet.')
         else:
             checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
             manager = tf.train.CheckpointManager(checkpoint, args.resume, max_to_keep=1)
@@ -156,7 +156,7 @@ def main(args):
             args.start_epoch = int(manager.latest_checkpoint.split('-')[-1])
             del manager, checkpoint
         else:
-            raise FileNotFoundError, f'Could not find checkpoint at {args.resume}'
+            raise FileNotFoundError(f'Could not find checkpoint at {args.resume}')
 
     if args.eval:
         test_stats, _ = evaluate(model, criterion, postprocessors,

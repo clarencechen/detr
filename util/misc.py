@@ -102,7 +102,7 @@ def find_strategy_single_worker(args):
                 # Memory growth must be set before GPUs have been initialized
                 print(e)
             gpu_name_list = [gpu.name for gpu in gpus]
-            print(len(args.num_gpus), f"{} Physical GPUs requested,", len(gpus), "Physical GPUs available")
+            print(f"{len(args.num_gpus)} Physical GPUs requested, {len(gpus)} Physical GPUs available")
             strategy = tf.distribute.MirroredStrategy(devices=gpu_name_list[:min(args.num_gpus, len(gpus))])
         else:
             strategy = tf.distribute.get_strategy()

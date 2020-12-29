@@ -2,6 +2,8 @@
 """
 DETR model and criterion classes.
 """
+from typing import List
+
 import tensorflow as tf
 from tensorflow.keras import layers, losses, Sequential, Model
 
@@ -11,8 +13,7 @@ from util.misc import accuracy
 from .backbone import build_backbone
 from .matcher import build_matcher
 from .postprocess import (PostProcess, PostProcessPanoptic)
-from .segmentation import (MHAttentionMap, MaskHeadSmallConv,
-                            dice_loss, sigmoid_focal_loss)
+from .segmentation import (MaskHeadSmallConv, dice_loss, sigmoid_focal_loss)
 from .transformer import build_transformer
 
 
@@ -33,21 +34,23 @@ class DETR():
         hidden_dim = transformer.d_model
         self.class_embed = layers.Dense(num_classes + 1)
         self.bbox_embed = Sequential([layers.Dense(hidden_dim, activation='relu')] * 2 + [layers.Dense(4, activation='sigmoid')])
-        self.query_embed = layers.Embedding(num_queries, hidden_dim)
+        self.query_embed = layers.Embedding(num_queries, hidden_dim)(tf.expand_dims(tf.range(num_queries, dtype=tf.int32), 0))
         self.input_proj = layers.Conv2D(hidden_dim, kernel_size=1)
+        self.input_reshape, self.pos_reshape = layers.Reshape((-1, hidden_dim)), layers.Reshape((-1, hidden_dim))
+        self.mask_reshape = layers.Reshape((-1,))
         self.aux_loss = aux_loss
         self.panoptic_seg_head = panoptic_seg_head
         self.is_training = training
 
         if panoptic_seg_head:
-            self.bbox_attention = MHAttentionMap(hidden_dim, hidden_dim, nheads, dropout=0.0)
+            self.bbox_attention = layers.MultiHeadAttention(n_heads, hidden_dim // nheads, dropout=0)
             self.mask_head = MaskHeadSmallConv(hidden_dim + nheads, [1024, 512, 256], hidden_dim)
 
     def build(self, features, pos, masks):
-        """ The output Keras model expects two inputs, which consists of:
+        """ The output Keras model expects three inputs, which consists of:
                - features: list of batched features from backbone, each of shape [batch_size x F_H x F_W x num_channels]
-               - pos: position embeddings, of shape [1 x H x W x num_pos_feats]
-               - masks: batched binary masks, of shape [batch_size x H x W], containing 1 on non-padded pixels
+               - pos: list of position embeddings, each of shape [1 x H x W x num_pos_feats]
+               - masks: batched binary masks, of shape [batch_size x F_H x F_W], containing 1 on non-padded pixels
 
             It returns a dict with the following elements:
                - "pred_logits": the classification logits (including no-object) for all queries.
@@ -59,10 +62,10 @@ class DETR():
                - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
                                 dictionnaries containing the two above keys for each decoder layer.
         """
-        src_proj = self.input_proj(features[-1])
-        hs, memory = self.transformer(src_proj, masks, self.query_embed.weights[0], pos[-1], training=self.is_training)
+        src_proj, flat_masks = self.input_reshape(self.input_proj(features[-1])), self.mask_reshape(masks)
+        hs, memory = self.transformer(src_proj, flat_masks, self.query_embed, self.pos_reshape(pos[-1]), training=self.is_training)
 
-        outputs_class, outputs_coord = list(zip([[self.class_embed(h), self.bbox_embed(h)] for h in hs]))
+        outputs_class, outputs_coord = [self.class_embed(h) for h in hs], [self.bbox_embed(h) for h in hs]
 
         out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
         if self.aux_loss:
@@ -70,11 +73,13 @@ class DETR():
 
         if self.panoptic_seg_head:
             # FIXME h_boxes takes the last one computed, keep this in mind
-            bbox_mask = self.bbox_attention(hs[-1], memory, training=self.is_training, mask=masks)
+            bbox_pad_mask = tf.expand_dims(masks, 1)
+            _, bbox_mask = self.bbox_attention(query=hs[-1], key=memory, training=self.is_training,
+                                               attention_mask=bbox_pad_mask, return_attention_scores=True)
+            bbox_mask = layers.Permute((2, 3, 4, 1))(bbox_mask)
 
             seg_masks = self.mask_head(src_proj, bbox_mask, [features[2], features[1], features[0]])
-            outputs_seg_masks = tf.reshape(seg_masks, [-1, self.num_queries, seg_masks.shape[-3], seg_masks.shape[-2]])
-            out["pred_masks"] = outputs_seg_masks
+            out["pred_masks"] = tf.reshape(seg_masks, [-1, self.num_queries, seg_masks.shape[-3], seg_masks.shape[-2]])
 
         return Model(inputs=(features, pos, masks), outputs=out)
 
@@ -86,7 +91,7 @@ class DETR():
                 for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
 
 
-class SetCriterion(Model):
+class SetCriterion:
     """ This class computes the loss for DETR.
     The process happens in two steps:
         1) we compute hungarian assignment between ground truth boxes and the outputs of the model
@@ -201,7 +206,7 @@ class SetCriterion(Model):
 
     @tf.function
     def _flatten_mask(x: tf.Tensor):
-        return tf.reshape(x, [x.shape[0], -1])
+        return tf.reshape(x, [tf.shape(x)[0], -1])
 
     @tf.function
     def _get_tgt_permutation(targets: tf.Tensor, indices: List[tf.Tensor], lengths: tf.Tensor):
@@ -313,8 +318,13 @@ def build(args, strategy):
         input_layer = layers.Input((args.max_size, args.max_size, 3))
         masks_input_layer = layers.Input((args.max_size, args.max_size))
 
-        backbone = build_backbone(args, input_layer, masks_input_layer)
-        detector = DETR(
+        backbone, out_tensors = build_backbone(args, input_layer, masks_input_layer)
+        out_feats, out_pos, out_masks = out_tensors
+        detr_feats = [layers.Input(o.shape[1:]) for o in out_feats]
+        detr_pos = [layers.Input(o.shape[1:]) for o in out_pos]
+        detr_masks = layers.Input(out_masks.shape[1:])
+
+        detector = DETR(backbone,
             build_transformer(args),
             num_classes=num_classes,
             num_queries=args.num_queries,
@@ -322,7 +332,7 @@ def build(args, strategy):
             panoptic_seg_head=args.masks,
             freeze_detr=(args.frozen_weights is not None),
             training=(not args.eval)
-        ).build(backbone.outputs[0], backbone.outputs[1], masks_input_layer)
+        ).build(detr_feats, detr_pos, detr_masks)
         matcher = build_matcher(args)
 
         losses = ['labels', 'boxes', 'cardinality']
@@ -334,7 +344,7 @@ def build(args, strategy):
         postprocessors = {'detr': PostProcess()}
         if args.masks:
             postprocessors['iou_types'] = ('bbox', 'segm')
-            args.dataset_file == "coco_panoptic":
+            if args.dataset_file == "coco_panoptic":
                 is_thing_map = {i: i <= 90 for i in range(201)}
                 postprocessors["panoptic"] = PostProcessPanoptic(is_thing_map, threshold=0.85)
         else:

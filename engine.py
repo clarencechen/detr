@@ -10,13 +10,13 @@ from typing import Tuple, Iterable
 import tensorflow as tf
 
 import util.misc as utils
-from utis.metric_logger import MetricLogger, SmoothedValue
+from util.metric_logger import MetricLogger, SmoothedValue
 # from datasets.coco_eval import CocoEvaluator
 # from datasets.panoptic_eval import PanopticEvaluator
 
 
 def train_one_epoch(model: Tuple[tf.keras.Model], criterion: tf.keras.Model,
-                    data_iter: Iterable, optimizer: Tuple[tf.train.Optimizer],
+                    data_iter: Iterable, optimizer: Tuple[tf.keras.optimizers.Optimizer],
                     strategy: tf.distribute.Strategy, epoch: int, max_norm: float = 0):
     backbone, detector = model
     b_optimizer, d_optimizer = optimizer

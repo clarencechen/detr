@@ -51,7 +51,7 @@ class PostProcess:
             for i in range(len(results)):
                 img_h, img_w = processed_sizes[i][0], processed_sizes[i][1]
                 out_masks_slice = outputs_masks[i, :img_h, :img_w, :]
-                results[i]["masks"] = tf.transpose(tf.image.resize(out_masks_slice, size=target_sizes[i], mode="nearest"), [2, 0, 1])
+                results[i]["masks"] = tf.transpose(tf.image.resize(out_masks_slice, size=target_sizes[i], method="nearest"), [2, 0, 1])
 
         return results
 
@@ -95,7 +95,7 @@ class PostProcessPanoptic:
             keep = (labels == (outputs["pred_logits"].shape[-1] - 1)) & (scores > self.threshold)
             cur_scores, cur_classes = tf.gather_nd(scores, keep), tf.gather_nd(labels, keep)
             cur_masks = tf.gather_nd(cur_masks, keep)
-            cur_masks = tf.squeeze(tf.image.resize(tf.expand_dims(cur_masks, -1), size, mode="bilinear"), -1)
+            cur_masks = tf.squeeze(tf.image.resize(tf.expand_dims(cur_masks, -1), size, method="bilinear"), -1)
             cur_boxes = box_ops.box_cxcywh_to_xyxy(tf.gather_nd(cur_boxes, keep))
 
             h, w = cur_masks.shape[-2], cur_masks.shape[-1]
@@ -128,9 +128,9 @@ class PostProcessPanoptic:
                                 m_id = tf.where(m_id == eq_id, equiv[0], m_id)
 
                 seg_img = id2rgb(tf.reshape(m_id, (h, w)).numpy())
-                seg_img = tf.image.resize(seg_image, size=target_size, mode="nearest")
+                seg_img = tf.image.resize(seg_image, size=target_size, method="nearest")
 
-                m_id = tf.image.resize(m_id, size=target_size, mode="nearest")
+                m_id = tf.image.resize(m_id, size=target_size, method="nearest")
 
                 area = tf.reduce_sum(tf.expand_dims(m_id, -1) == tf.expand_dims(scores, [-3, -2]), [-3, -2])
                 return area, seg_img
