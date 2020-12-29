@@ -11,8 +11,8 @@ import tensorflow as tf
 
 import util.misc as utils
 from utis.metric_logger import MetricLogger, SmoothedValue
-from datasets.coco_eval import CocoEvaluator
-from datasets.panoptic_eval import PanopticEvaluator
+# from datasets.coco_eval import CocoEvaluator
+# from datasets.panoptic_eval import PanopticEvaluator
 
 
 def train_one_epoch(model: Tuple[tf.keras.Model], criterion: tf.keras.Model,

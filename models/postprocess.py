@@ -2,14 +2,10 @@ import io
 from collections import defaultdict
 from typing import List, Optional
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch import Tensor
+import tensorflow as tf
 from PIL import Image
 
 import util.box_ops as box_ops
-from util.misc import NestedTensor, interpolate, nested_tensor_from_tensor_list
 
 try:
     from panopticapi.utils import id2rgb, rgb2id
@@ -17,61 +13,50 @@ except ImportError:
     pass
 
 
-class PostProcess(nn.Module):
-    """ This module converts the model's output into the format expected by the coco api"""
-    @torch.no_grad()
-    def forward(self, outputs, target_sizes):
-        """ Perform the computation
+class PostProcess:
+    def __init__(self, threshold=0.5):
+        self.threshold = threshold
+
+    def __call__(self, outputs, processed_sizes, target_sizes=None):
+        """ This module converts the model's output into the format expected by the coco api
         Parameters:
             outputs: raw outputs of the model
-            target_sizes: tensor of dimension [batch_size x 2] containing the size of each images of the batch
-                          For evaluation, this must be the original image size (before any data augmentation)
-                          For visualization, this should be the image size after data augment, but before padding
+            processed_sizes: This is a tensor of dimension [batch_size x 2] of sizes of the images that were passed to
+                             the model, ie the size after data augmentation but before batching.
+            target_sizes: This is a tensor of dimension [batch_size x 2] corresponding to the requested final size
+                          of each prediction. If left to None, it will default to the processed_sizes
         """
         out_logits, out_bbox = outputs['pred_logits'], outputs['pred_boxes']
 
-        assert len(out_logits) == len(target_sizes)
+        assert out_logits.shape[0] == target_sizes.shape[0]
+        assert target_sizes.shape[0] == processed_sizes.shape[0]
         assert target_sizes.shape[1] == 2
 
-        prob = F.softmax(out_logits, -1)
-        scores, labels = prob[..., :-1].max(-1)
+        prob = tf.nn.softmax(out_logits, -1)
+        scores, labels = tf.reduce_max(prob[..., :-1], -1)
 
         # convert to [x0, y0, x1, y1] format
         boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
         # and from relative [0, 1] to absolute [0, height] coordinates
-        img_h, img_w = target_sizes.unbind(1)
-        scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
-        boxes = boxes * scale_fct[:, None, :]
+        scale_fct = tf.stack([target_sizes[:, 1], target_sizes[:, 0], target_sizes[:, 1], target_sizes[:, 0]], 1)
+        boxes = boxes * tf.expand_dims(scale_fct, 1)
 
-        results = [{'scores': s, 'labels': l, 'boxes': b} for s, l, b in zip(scores, labels, boxes)]
+        results = [{'scores': scores[i], 'labels': labels[i], 'boxes': boxes[i]} for i in range(target_sizes.shape[0])]
 
-        return results
+        if 'pred_masks' in outputs:
+            max_size = tf.reduce_max(processed_sizes, 0)
+            outputs_masks = tf.transpose(outputs['pred_masks'], [0, 2, 3, 1])
+            outputs_masks = tf.sigmoid(outputs_masks) > self.threshold
 
-
-class PostProcessSegm(nn.Module):
-    def __init__(self, threshold=0.5):
-        super().__init__()
-        self.threshold = threshold
-
-    @torch.no_grad()
-    def forward(self, results, outputs, orig_target_sizes, max_target_sizes):
-        assert len(orig_target_sizes) == len(max_target_sizes)
-        max_h, max_w = max_target_sizes.max(0)[0].tolist()
-        outputs_masks = outputs["pred_masks"].squeeze(2)
-        outputs_masks = F.interpolate(outputs_masks, size=(max_h, max_w), mode="bilinear", align_corners=False)
-        outputs_masks = (outputs_masks.sigmoid() > self.threshold).cpu()
-
-        for i, (cur_mask, t, tt) in enumerate(zip(outputs_masks, max_target_sizes, orig_target_sizes)):
-            img_h, img_w = t[0], t[1]
-            results[i]["masks"] = cur_mask[:, :img_h, :img_w].unsqueeze(1)
-            results[i]["masks"] = F.interpolate(
-                results[i]["masks"].float(), size=tuple(tt.tolist()), mode="nearest"
-            ).byte()
+            for i in range(len(results)):
+                img_h, img_w = processed_sizes[i][0], processed_sizes[i][1]
+                out_masks_slice = outputs_masks[i, :img_h, :img_w, :]
+                results[i]["masks"] = tf.transpose(tf.image.resize(out_masks_slice, size=target_sizes[i], mode="nearest"), [2, 0, 1])
 
         return results
 
 
-class PostProcessPanoptic(nn.Module):
+class PostProcessPanoptic:
     """This class converts the output of the model to the final panoptic result, in the format expected by the
     coco panoptic API """
 
@@ -82,7 +67,6 @@ class PostProcessPanoptic(nn.Module):
                           the class is  a thing (True) or a stuff (False) class
            threshold: confidence threshold: segments with confidence lower than this will be deleted
         """
-        super().__init__()
         self.threshold = threshold
         self.is_thing_map = is_thing_map
 
@@ -90,103 +74,87 @@ class PostProcessPanoptic(nn.Module):
         """ This function computes the panoptic prediction from the model's predictions.
         Parameters:
             outputs: This is a dict coming directly from the model. See the model doc for the content.
-            processed_sizes: This is a list of tuples (or torch tensors) of sizes of the images that were passed to the
-                             model, ie the size after data augmentation but before batching.
-            target_sizes: This is a list of tuples (or torch tensors) corresponding to the requested final size
+            processed_sizes: This is a tensor of dimension [batch_size x 2] of sizes of the images that were passed to
+                             the model, ie the size after data augmentation but before batching.
+            target_sizes: This is a tensor of dimension [batch_size x 2] corresponding to the requested final size
                           of each prediction. If left to None, it will default to the processed_sizes
             """
         if target_sizes is None:
             target_sizes = processed_sizes
-        assert len(processed_sizes) == len(target_sizes)
+        assert processed_sizes.shape[0] == target_sizes.shape[0]
         out_logits, raw_masks, raw_boxes = outputs["pred_logits"], outputs["pred_masks"], outputs["pred_boxes"]
-        assert len(out_logits) == len(raw_masks) == len(target_sizes)
+        assert out_logits.shape[0] == raw_masks.shape[0] == target_sizes.shape[0]
         preds = []
-
-        def to_tuple(tup):
-            if isinstance(tup, tuple):
-                return tup
-            return tuple(tup.cpu().tolist())
 
         for cur_logits, cur_masks, cur_boxes, size, target_size in zip(
             out_logits, raw_masks, raw_boxes, processed_sizes, target_sizes
         ):
             # we filter empty queries and detection below threshold
-            scores, labels = cur_logits.softmax(-1).max(-1)
-            keep = labels.ne(outputs["pred_logits"].shape[-1] - 1) & (scores > self.threshold)
-            cur_scores, cur_classes = cur_logits.softmax(-1).max(-1)
-            cur_scores = cur_scores[keep]
-            cur_classes = cur_classes[keep]
-            cur_masks = cur_masks[keep]
-            cur_masks = interpolate(cur_masks[:, None], to_tuple(size), mode="bilinear").squeeze(1)
-            cur_boxes = box_ops.box_cxcywh_to_xyxy(cur_boxes[keep])
+            cur_probs = tf.nn.softmax(cur_logits, -1)
+            scores, labels = tf.reduce_max(cur_probs, -1), tf.argmax(cur_probs, -1)
+            keep = (labels == (outputs["pred_logits"].shape[-1] - 1)) & (scores > self.threshold)
+            cur_scores, cur_classes = tf.gather_nd(scores, keep), tf.gather_nd(labels, keep)
+            cur_masks = tf.gather_nd(cur_masks, keep)
+            cur_masks = tf.squeeze(tf.image.resize(tf.expand_dims(cur_masks, -1), size, mode="bilinear"), -1)
+            cur_boxes = box_ops.box_cxcywh_to_xyxy(tf.gather_nd(cur_boxes, keep))
 
-            h, w = cur_masks.shape[-2:]
-            assert len(cur_boxes) == len(cur_classes)
+            h, w = cur_masks.shape[-2], cur_masks.shape[-1]
+            assert cur_boxes.shape[0] == cur_classes.shape[0]
 
             # It may be that we have several predicted masks for the same stuff class.
             # In the following, we track the list of masks ids for each stuff class (they are merged later on)
-            cur_masks = cur_masks.flatten(1)
             stuff_equiv_classes = defaultdict(lambda: [])
-            for k, label in enumerate(cur_classes):
-                if not self.is_thing_map[label.item()]:
-                    stuff_equiv_classes[label.item()].append(k)
+            for k in range(cur_classes.shape[0]):
+                if not self.is_thing_map[label[k]]:
+                    stuff_equiv_classes[label[k]].append(k)
 
             def get_ids_area(masks, scores, dedup=False):
                 # This helper function creates the final panoptic segmentation image
                 # It also returns the area of the masks that appears on the image
 
-                m_id = masks.transpose(0, 1).softmax(-1)
+                m_id = tf.nn.softmax(masks, 0)
 
                 if m_id.shape[-1] == 0:
                     # We didn't detect any mask :(
-                    m_id = torch.zeros((h, w), dtype=torch.long, device=m_id.device)
+                    m_id = tf.zeros((h, w), dtype=tf.int32)
                 else:
-                    m_id = m_id.argmax(-1).view(h, w)
+                    m_id = tf.argmax(m_id, 0)
 
                 if dedup:
                     # Merge the masks corresponding to the same stuff class
                     for equiv in stuff_equiv_classes.values():
                         if len(equiv) > 1:
                             for eq_id in equiv:
-                                m_id.masked_fill_(m_id.eq(eq_id), equiv[0])
+                                m_id = tf.where(m_id == eq_id, equiv[0], m_id)
 
-                final_h, final_w = to_tuple(target_size)
+                seg_img = id2rgb(tf.reshape(m_id, (h, w)).numpy())
+                seg_img = tf.image.resize(seg_image, size=target_size, mode="nearest")
 
-                seg_img = Image.fromarray(id2rgb(m_id.view(h, w).cpu().numpy()))
-                seg_img = seg_img.resize(size=(final_w, final_h), resample=Image.NEAREST)
+                m_id = tf.image.resize(m_id, size=target_size, mode="nearest")
 
-                np_seg_img = (
-                    torch.ByteTensor(torch.ByteStorage.from_buffer(seg_img.tobytes())).view(final_h, final_w, 3).numpy()
-                )
-                m_id = torch.from_numpy(rgb2id(np_seg_img))
-
-                area = []
-                for i in range(len(scores)):
-                    area.append(m_id.eq(i).sum().item())
+                area = tf.reduce_sum(tf.expand_dims(m_id, -1) == tf.expand_dims(scores, [-3, -2]), [-3, -2])
                 return area, seg_img
 
             area, seg_img = get_ids_area(cur_masks, cur_scores, dedup=True)
-            if cur_classes.numel() > 0:
+            if tf.size(cur_classes) > 0:
                 # We know filter empty masks as long as we find some
                 while True:
-                    filtered_small = torch.as_tensor(
-                        [area[i] <= 4 for i, c in enumerate(cur_classes)], dtype=torch.bool, device=keep.device
-                    )
-                    if filtered_small.any().item():
-                        cur_scores = cur_scores[~filtered_small]
-                        cur_classes = cur_classes[~filtered_small]
-                        cur_masks = cur_masks[~filtered_small]
+                    filtered_small = tf.where(area <= 4)
+                    if tf.reduce_any(filtered_small):
+                        cur_scores = tf.gather_nd(cur_scores, ~filtered_small)
+                        cur_classes = tf.gather_nd(cur_classes, ~filtered_small)
+                        cur_masks = tf.gather_nd(cur_masks, ~filtered_small)
                         area, seg_img = get_ids_area(cur_masks, cur_scores)
                     else:
                         break
 
             else:
-                cur_classes = torch.ones(1, dtype=torch.long, device=cur_classes.device)
+                cur_classes = tf.ones(1, dtype=tf.int32)
 
             segments_info = []
-            for i, a in enumerate(area):
-                cat = cur_classes[i].item()
-                segments_info.append({"id": i, "isthing": self.is_thing_map[cat], "category_id": cat, "area": a})
+            for i in range(area.shape[0]):
+                cat = cur_classes[i]
+                segments_info.append({"id": i, "isthing": self.is_thing_map[cat], "category_id": cat, "area": area[i]})
             del cur_classes
 
             with io.BytesIO() as out:
