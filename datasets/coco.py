@@ -15,18 +15,19 @@ import datasets.transforms as T
 
 
 class CocoDataset:
-    def __init__(self, ds_name, image_set, seed=None, return_masks=True):
+    def __init__(self, ds_name, image_set, seed=None, return_masks=True, max_size=1333):
         self.ds_name = ds_name + ('/panoptic' if return_masks else '')
         self.image_set = image_set
         self.seed = seed
         self.target_key = 'panoptic_objects' if return_masks else 'objects'
         self.transforms = self.make_coco_transforms()
         self.return_masks = return_masks
+        self.max_size = max_size
 
         def make_coco_transforms(self):
             normalize = pp_layers.Normalization(dtype=tf.float32, mean=[0.485, 0.456, 0.406], variance=[0.229, 0.224, 0.225])
             rescale = pp_layers.Rescaling(scale=1./255)
-            resize_800 = tf.keras.layers.LambdaLayer(lambda image, target: T.resize(image, target, 800, max_size=1333))
+            resize_800 = tf.keras.layers.LambdaLayer(lambda image, target: T.resize(image, target, 800, max_size=self.max_size))
 
             random_flip = T.RandomFlipExtd(mode='horizontal', seed=self.seed)
             crop = T.RandomCropExtd(min_size=384, max_size=600, seed=self.seed)
@@ -90,11 +91,13 @@ class CocoDataset:
         if self.transforms is not None:
             ds = ds.map(self.transforms, num_parallel_calls=num_workers)
         ds = ds.map(self.format_box_masks, num_parallel_calls=num_workers)
-        ds = ds.padded_batch(batch_size, drop_remainder=True)
+        ds = ds.padded_batch(batch_size, padded_shapes=(
+                             [self.max_size, self.max_size, 3], [self.max_size, self.max_size, 3], [None]
+                             ), drop_remainder=True)
         ds = ds.prefetch(buffer_size=AUTOTUNE)
 
         return ds
 
 
 def build(ds_name, image_set, args, seed):
-    return CocoDataset(ds_name, image_set, seed=seed, return_masks=args.masks)
+    return CocoDataset(ds_name, image_set, seed=seed, return_masks=args.masks, max_size=args.max_size)

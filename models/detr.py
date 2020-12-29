@@ -10,8 +10,7 @@ from util.misc import accuracy
 
 from .backbone import build_backbone
 from .matcher import build_matcher
-from .postprocess import (PostProcess, PostProcessPanoptic,
-                            PostProcessSegm)
+from .postprocess import (PostProcess, PostProcessPanoptic)
 from .segmentation import (MHAttentionMap, MaskHeadSmallConv,
                             dice_loss, sigmoid_focal_loss)
 from .transformer import build_transformer
