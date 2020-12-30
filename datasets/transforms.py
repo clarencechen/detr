@@ -143,3 +143,22 @@ class RandomResizeExtd(pp_layers.PreprocessingLayer):
         size = tf.gather(sizes, idx, axis=0)
         img, tgt = tf.cond(training, resize(img, tgt, size, self.max_size), lambda: img, tgt)
         return img, tgt
+
+
+class RandomSelect(pp_layers.PreprocessingLayer):
+    def __init__(self, fn, p=0.5, seed=None, **kwargs):
+        super(RandomSelect, self).__init__(**kwargs)
+        self.p = p
+        self.fn = fn
+        self.rng = make_generator(seed=seed)
+
+    def __call__(self, *args, training=True):
+        if training is None:
+            training = learning_phase()
+
+        select = self.rng.uniform([], 0, 1, dtype=tf.float32)
+        img, tgt = tf.cond(training,
+                           lambda: tf.cond(select < self.p, lambda: args, self.fn(*args)),
+                           lambda: args
+                          )
+        return img, tgt
