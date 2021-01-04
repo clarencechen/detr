@@ -42,15 +42,18 @@ def crop(img, tgt, region):
 def resize(img, tgt, min_size, max_size=None):
     updates = {}
     old_shape = tf.shape(img)[-3:-1]
-    ratio = tf.cast(min_size, tf.float32) / tf.cast(tf.reduce_min(old_shape), tf.float32)
-    if max_size and (ratio * tf.reduce_max(old_shape) > max_size):
-        ratio = tf.cast(max_size, tf.float32) / tf.cast(tf.reduce_max(old_shape), tf.float32)
-    new_shape = tf.cast(ratio * tf.cast(old_shape, tf.float32), tf.int32)
+    if not max_size:
+        short, long = tf.reduce_min(old_shape), tf.reduce_max(old_shape)
+        max_size = tf.cast((long * min_size) / short, tf.int32) + 1
+    if old_shape[0] > old_shape[1]:
+        new_shape = tf.constant([max_size, min_size], dtype=tf.int32) 
+    else:
+        new_shape = tf.constant([min_size, max_size], dtype=tf.int32) 
 
-    new_img = tf.image.resize(img, new_shape, method='bilinear')
+    new_img = tf.image.resize(img, new_shape, method='bilinear', preserve_aspect_ratio=True)
 
     if "masks" in tgt:
-        rescaled_masks = tf.image.resize(tgt['masks'], new_shape, method='nearest')
+        rescaled_masks = tf.image.resize(tgt['masks'], new_shape, method='nearest', preserve_aspect_ratio=True)
         updates['masks'] = rescaled_masks
 
     if "area" in tgt:
