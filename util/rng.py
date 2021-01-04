@@ -6,7 +6,7 @@ Mostly copy-paste from Keras Preprocessing Layers source code.
 """
 import tensorflow as tf
 
-class _RandomGenerator(tf.random.Generator):
+class RandomGenerator(tf.random.Generator):
     """A subclass that allows creation inside distribution strategies.
     This is a temporary solution to allow creating tf.random.Generator inside
     distribution strategies. It will be removed when proper API is in place.
@@ -27,11 +27,4 @@ class _RandomGenerator(tf.random.Generator):
             return state_var.values[0]
 
     def _create_variable(self, *args, **kwargs):
-        return tf.Variable(*args, **kwargs)
-
-
-def make_generator(seed=None):
-    if seed:
-        return _RandomGenerator.from_seed(seed)
-    else:
-        return _RandomGenerator.from_non_deterministic_state()
+        return tf.Variable(*((lambda: arg) for arg in args), **kwargs)

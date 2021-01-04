@@ -6,9 +6,11 @@ Mostly copy-paste from https://github.com/pytorch/vision/blob/13b35ff/references
 """
 import tensorflow as tf
 import tensorflow_datasets as tfds
-import tensorflow.keras.layers.experimental.preprocessing as pp_layers
+
+from typing import Dict
 
 from tensorflow.data.experimental import AUTOTUNE
+from tensorflow.keras.applications import imagenet_utils
 from util.box_ops import box_xyxy_to_cxcywh, box_swap_xy
 from util.misc import shallow_update_dict
 
@@ -19,41 +21,31 @@ class CocoDataset:
     # Implementation of Dataset Pipeline
     def __init__(self, ds_name, image_set, source, seed=None, return_masks=True, max_size=1333, num_queries=100):
         self.load_string = ds_name
+
+        if image_set not in ('train', 'val', 'validation'):
+            raise ValueError(f'unknown {image_set}')
         self.image_set = image_set
+
         self.source = source
         self.seed = seed
         self.target_key = 'panoptic_objects' if 'panoptic' in ds_name else 'objects'
-        self.transforms = self.make_coco_transforms(image_set)
         self.return_masks = return_masks
         self.max_size = max_size
         self.num_queries = num_queries
 
+        self.random_flip = T.RandomFlipExtd(seed=seed)
+        self.crop_cond = T.RandomPartialCropResize(scales=[400, 500, 600], min_size=384, max_size=600, seed=seed)
+        self.resize_scales = T.RandomResizeExtd([480 + 32 * i for i in range(11)], seed=seed)
 
-    def make_coco_transforms(self, image_set):
-        normalize = pp_layers.Normalization(dtype=tf.float32, mean=[0.485, 0.456, 0.406], variance=[0.229, 0.224, 0.225])
-        rescale = pp_layers.Rescaling(scale=1./255)
+    def transforms(self, img, tgt):
+        training = (self.image_set == 'train')
 
-        random_flip = T.RandomFlipExtd(seed=self.seed)
-        crop = T.RandomCropExtd(min_size=384, max_size=600, seed=self.seed)
-        resize_crop = T.RandomResizeExtd([400, 500, 600], seed=self.seed)
-        crop_cond = T.RandomSelect(tf.keras.Sequential(resize_crop, crop), seed=self.seed)
-        resize_scales = T.RandomResizeExtd([480 + 32 * i for i in range(11)], seed=self.seed)
-
-        def train_transform(image, targets):
-            image, targets = random_flip(image, targets, training=True)
-            image, targets = crop_cond(image, targets, training=True)
-            image, targets = resize_scales(image, targets)
-            return normalize(rescale(image)), targets
-
-        def val_transform(image, targets):
-            image, targets = T.resize(image, targets, 800, max_size=self.max_size)
-            return normalize(rescale(image)), targets
-
-        if image_set == 'train':
-            return train_transform
-        elif image_set == 'validation':
-            return val_transform
-        raise ValueError(f'unknown {image_set}')
+        img, tgt = self.random_flip(img, tgt, training=training)
+        img, tgt = self.crop_cond(img, tgt, training=training)
+        img, tgt = self.resize_scales(img, tgt, training=training)
+        if not training:
+            img, tgt = T.resize(img, tgt, 800, max_size=self.max_size)
+        return imagenet_utils.preprocess_input(img, mode='caffe'), tgt
 
 
     def format_box_masks(self, img, tgt):
@@ -137,8 +129,7 @@ class CocoDataset:
         if self.source == 'tfrecord':
             ds = ds.map(self.deserialize_example, num_parallel_calls=num_workers)
         ds = ds.map(self.decode_example, num_parallel_calls=num_workers)
-        if self.transforms is not None:
-            ds = ds.map(self.transforms, num_parallel_calls=num_workers)
+        ds = ds.map(self.transforms, num_parallel_calls=num_workers)
         ds = ds.map(self.format_box_masks, num_parallel_calls=num_workers)
 
         tgt_padded_shape_dict = {

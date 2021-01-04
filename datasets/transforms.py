@@ -6,26 +6,27 @@ import tensorflow as tf
 import tensorflow.keras.layers as layers
 import tensorflow.keras.layers.experimental.preprocessing as pp_layers
 
+from abc import abstractmethod
 from tensorflow.keras.backend import learning_phase
 from util.misc import shallow_update_dict
 from util.box_ops import box_area_xyxy
-from util.rng import make_generator
+from util.rng import RandomGenerator
 
-@tf.function
+
 def crop(img, tgt, region):
     updates = {}
     i, j, h, w = region
-    cropped_img = tf.image.crop_to_bounding_box(img, i, j, h, w)
+    new_img = tf.image.crop_to_bounding_box(img, i, j, h, w)
 
     if "boxes" in tgt:
-        max_size = tf.tile(tf.shape(img)[-3:-1], [2])
-        cropped_boxes = tgt["boxes"] * max_size - tf.concat([i, j, i, j])
-        cropped_boxes = cropped_boxes / tf.cast(tf.concat([h, w, h, w]), tf.float32)
-        updates["boxes"] = tf.clip_by_value(cropped_boxes, min=0, max=1)
+        max_size = tf.cast(tf.tile(tf.shape(img)[-3:-1], [2]), tf.float32)
+        new_boxes = tgt["boxes"] * max_size - tf.cast(tf.stack([i, j, i, j]), tf.float32)
+        new_boxes = new_boxes / tf.cast(tf.stack([h, w, h, w]), tf.float32)
+        updates["boxes"] = tf.clip_by_value(new_boxes, 0, 1)
 
     if "masks" in tgt:
-        cropped_masks = tf.image.crop_to_bounding_box(tgt['masks'], i, j, h, w)
-        updates['masks'] = cropped_masks
+        new_masks = tf.image.crop_to_bounding_box(tgt['masks'], i, j, h, w)
+        updates['masks'] = new_masks
 
     if "area" in tgt and ("boxes" in tgt or "masks" in tgt):
         # favor masks selection when recalculating area
@@ -34,35 +35,32 @@ def crop(img, tgt, region):
         if "masks" in tgt:
             updates["area"] = tf.reduce_sum(tf.cast(tgt['masks'], tf.int32), [-3, -2])
         else:
-            updates["area"] = tf.cast(box_area_xyxy(cropped_boxes), tf.int32)
+            updates["area"] = tf.cast(box_area_xyxy(new_boxes), tf.int32)
 
-    return cropped_img, shallow_update_dict(tgt, updates)
+    return new_img, shallow_update_dict(tgt, updates)
 
-@tf.function
+
 def resize(img, tgt, min_size, max_size=None):
     updates = {}
     old_shape = tf.shape(img)[-3:-1]
     if not max_size:
         short, long = tf.reduce_min(old_shape), tf.reduce_max(old_shape)
         max_size = tf.cast((long * min_size) / short, tf.int32) + 1
-    if old_shape[0] > old_shape[1]:
-        new_shape = tf.constant([max_size, min_size], dtype=tf.int32) 
-    else:
-        new_shape = tf.constant([min_size, max_size], dtype=tf.int32) 
 
-    new_img = tf.image.resize(img, new_shape, method='bilinear', preserve_aspect_ratio=True)
+    new_shape = (max_size, min_size) if old_shape[0] > old_shape[1] else (min_size, max_size)
+    new_img = tf.cast(tf.image.resize(img, new_shape, method='bilinear', preserve_aspect_ratio=True), tf.uint8)
 
     if "masks" in tgt:
-        rescaled_masks = tf.image.resize(tgt['masks'], new_shape, method='nearest', preserve_aspect_ratio=True)
-        updates['masks'] = rescaled_masks
+        new_masks = tf.image.resize(tgt['masks'], new_shape, method='nearest', preserve_aspect_ratio=True)
+        updates['masks'] = new_masks
 
     if "area" in tgt:
-        rescaled_area = (tgt["area"] * tf.reduce_prod(new_shape)) / tf.reduce_prod(old_shape)
-        updates["area"] = rescaled_area
+        new_area = (tgt["area"] * tf.reduce_prod(new_shape)) / tf.reduce_prod(old_shape)
+        updates["area"] = tf.cast(new_area, tf.int32)
 
     return new_img, shallow_update_dict(tgt, updates)
 
-@tf.function
+
 def flip(img, tgt, seeds, h=False, v=False):
     updates = {}
     if h:
@@ -97,30 +95,43 @@ def flip(img, tgt, seeds, h=False, v=False):
     return flipped_img, shallow_update_dict(tgt, updates)
 
 
-class RandomCropExtd(pp_layers.PreprocessingLayer):
+class RandomAugment(pp_layers.PreprocessingLayer):
+    def __init__(self, *args, seed=None, **kwargs):
+        super(RandomAugment, self).__init__(*args, **kwargs)
+        if seed is None:
+            self.rng = RandomGenerator.from_non_deterministic_state()
+        else:
+            self.rng = RandomGenerator.from_seed(seed)
+
+    @abstractmethod
+    def call(self, img, tgt, training):
+        raise NotImplementedError
+
+
+class RandomCropExtd(RandomAugment):
     def __init__(self, min_size, max_size, seed=None, **kwargs):
-        super(RandomCropExtd, self).__init__(**kwargs)
+        super(RandomCropExtd, self).__init__(seed=seed, **kwargs)
         self.min_size = min_size
         self.max_size = max_size
-        self.rng = make_generator(seed=seed)
+
 
     def call(self, img, tgt, training):
         if training:
             img_h, img_w = tf.shape(img)[-3], tf.shape(img)[-2]
-            h = self.rng.uniform([1], self.min_size, tf.minimum(img_h, self.max_size), dtype=tf.int32)
-            w = self.rng.uniform([1], self.min_size, tf.minimum(img_w, self.max_size), dtype=tf.int32)
-            i = self.rng.uniform([1], 0, img_h - h, dtype=tf.int32)
-            j = self.rng.uniform([1], 0, img_w - w, dtype=tf.int32)
+            h = self.rng.uniform([1], self.min_size, tf.minimum(img_h, self.max_size), dtype=tf.int32)[0]
+            w = self.rng.uniform([1], self.min_size, tf.minimum(img_w, self.max_size), dtype=tf.int32)[0]
+            i = self.rng.uniform([1], 0, img_h - h, dtype=tf.int32)[0]
+            j = self.rng.uniform([1], 0, img_w - w, dtype=tf.int32)[0]
             return crop(img, tgt, (i, j, h, w))
         return img, tgt
 
 
-class RandomFlipExtd(pp_layers.PreprocessingLayer):
+class RandomFlipExtd(RandomAugment):
     def __init__(self, horizontal=True, vertical=False, seed=None, **kwargs):
-        super(RandomFlipExtd, self).__init__(**kwargs)
+        super(RandomFlipExtd, self).__init__(seed=seed, **kwargs)
         self.horizontal = horizontal
         self.vertical = vertical
-        self.rng = make_generator(seed=seed)
+
 
     def call(self, img, tgt, training):
         if training:
@@ -129,32 +140,41 @@ class RandomFlipExtd(pp_layers.PreprocessingLayer):
         return img, tgt
 
 
-class RandomResizeExtd(pp_layers.PreprocessingLayer):
+class RandomResizeExtd(RandomAugment):
     def __init__(self, sizes, seed=None, max_size=None, **kwargs):
         assert isinstance(sizes, (list, tuple))
-        super(RandomResizeExtd, self).__init__(**kwargs)
+        super(RandomResizeExtd, self).__init__(seed=seed, **kwargs)
         self.sizes = sizes
         self.max_idx = len(sizes)
         self.max_size = max_size
-        self.rng = make_generator(seed=seed)
+
 
     def call(self, img, tgt, training):
         if training:
             idx = self.rng.uniform([1], 0, self.max_idx, dtype=tf.int32)
-            size = tf.gather(self.sizes, idx, axis=0)
+            size = tf.gather(self.sizes, idx, axis=0)[0]
             return resize(img, tgt, size, self.max_size)
         return img, tgt
 
 
-class RandomSelect(pp_layers.PreprocessingLayer):
-    def __init__(self, fn, p=0.5, seed=None, **kwargs):
-        super(RandomSelect, self).__init__(**kwargs)
+class RandomPartialCropResize(RandomCropExtd):
+    def __init__(self, scales, min_size, max_size, p=0.5, seed=None, **kwargs):
+        assert isinstance(scales, (list, tuple))
+        super(RandomPartialCropResize, self).__init__(min_size, max_size, seed=seed, **kwargs)
         self.p = p
-        self.fn = fn
-        self.rng = make_generator(seed=seed)
+        self.scales = scales
+        self.max_idx = len(scales)
 
-    def call(self, *args, training=None):
+
+    def run_transform(self, img, tgt, training):
+        idx = self.rng.uniform([1], 0, self.max_idx, dtype=tf.int32)
+        scale = tf.gather(self.scales, idx, axis=0)[0]
+        crop_img, crop_tgt = super().call(img, tgt, training)
+        return resize(crop_img, crop_tgt, scale, None)
+
+
+    def call(self, img, tgt, training):
         if training:
             select = self.rng.uniform([1], 0, 1, dtype=tf.float32)
-            return tf.cond(select < self.p, self.fn(*args, training=training), lambda: args)
-        return args
+            return tf.cond(select < self.p, lambda: self.run_transform(img, tgt, training), lambda: (img, tgt))
+        return img, tgt
