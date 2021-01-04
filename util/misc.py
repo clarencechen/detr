@@ -112,7 +112,6 @@ def find_strategy_single_worker(args):
 def get_rank():
     return 1
 
-
 @tf.function
 def accuracy(output, target, topk=(1,)):
     """Computes the precision@k for the specified values of k"""
@@ -128,3 +127,13 @@ def accuracy(output, target, topk=(1,)):
         correct_k = tf.reduce_sum(tf.cast(tf.reshape(correct[:k], -1), tf.float64), 0)
         res.append(correct_k * (100.0 / batch_size))
     return res
+
+@tf.function
+def shallow_update_dict(base, updates):
+    ret = {}
+    for k, v in base.items():
+        if k in updates:
+            ret[k] = updates[k]
+        else:
+            ret[k] = v
+    return ret

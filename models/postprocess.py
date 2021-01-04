@@ -108,7 +108,7 @@ class PostProcessPanoptic:
                 if not self.is_thing_map[label[k]]:
                     stuff_equiv_classes[label[k]].append(k)
 
-            def get_ids_area(masks, scores, dedup=False):
+            def get_ids_area(masks, classes, dedup=False):
                 # This helper function creates the final panoptic segmentation image
                 # It also returns the area of the masks that appears on the image
 
@@ -131,11 +131,11 @@ class PostProcessPanoptic:
                 seg_img = tf.image.resize(seg_image, size=target_size, method="nearest")
 
                 m_id = tf.image.resize(m_id, size=target_size, method="nearest")
-
-                area = tf.reduce_sum(tf.expand_dims(m_id, -1) == tf.expand_dims(scores, [-3, -2]), [-3, -2])
+                cur_classes_map = tf.expand_dims(tf.expand_dims(cur_classes, -2), -3)
+                area = tf.reduce_sum(tf.expand_dims(m_id, -1) == cur_classes_map, [-3, -2])
                 return area, seg_img
 
-            area, seg_img = get_ids_area(cur_masks, cur_scores, dedup=True)
+            area, seg_img = get_ids_area(cur_masks, cur_classes, dedup=True)
             if tf.size(cur_classes) > 0:
                 # We know filter empty masks as long as we find some
                 while True:

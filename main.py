@@ -78,7 +78,8 @@ def get_args_parser():
                         help="Relative classification weight of the no-object class")
 
     # dataset parameters
-    parser.add_argument('--dataset_file', default='coco')
+    parser.add_argument('--dataset_file', default='coco_panoptic')
+    parser.add_argument('--source', default='tfrecord')
     parser.add_argument('--coco_path', type=str)
     parser.add_argument('--coco_panoptic_path', type=str)
     parser.add_argument('--remove_difficult', action='store_true')
@@ -120,6 +121,9 @@ def main(args):
 
     backbone, detector, criterion, postprocessors = build_model(args, strategy)
 
+    detector.summary()
+    backbone.summary()
+
     dataset_train = build_dataset(image_set='train', args=args, seed=seed)
     dataset_val = build_dataset(image_set='validation', args=args, seed=seed)
 
@@ -130,9 +134,6 @@ def main(args):
     data_iter_train = iter(strategy.experimental_distribute_dataset(data_loader_train))
     data_iter_val = iter(strategy.experimental_distribute_dataset(data_loader_val))
     num_steps_per_epoch = len(data_iter_train)
-
-    backbone.summary()
-    detector.summary()
 
     backbone_scheduler = tf.keras.optimizers.schedules.ExponentialDecay(args.lr_backbone, args.lr_drop * num_steps_per_epoch, 0.1, staircase=True)
     detector_scheduler = tf.keras.optimizers.schedules.ExponentialDecay(args.lr, args.lr_drop * num_steps_per_epoch, 0.1, staircase=True)
@@ -176,7 +177,7 @@ def main(args):
             save_manager.save(checkpoint_number=epoch + 1)
             # extra checkpoint before LR drop and every 100 epochs
             if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % 100 == 0:
-                save_checkpoint.save(output_dir / f'checkpoint{epoch:04}')
+                save_checkpoint.save(output_dir / f'checkpoint-{epoch:04}')
 
         test_stats, coco_evaluator = evaluate(
             model, criterion, postprocessors, data_iter_val, args.output_dir
