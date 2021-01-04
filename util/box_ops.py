@@ -5,6 +5,11 @@ Utilities for bounding box manipulation and GIoU.
 import tensorflow as tf
 
 @tf.function
+def box_swap_xy(x):
+    return tf.stack([x[..., 1], x[..., 0],
+                     x[..., 3], x[..., 2]], axis=-1)
+
+@tf.function
 def box_area_xyxy(x):
     return (x[..., 2] - x[..., 0]) * (x[..., 3] - x[..., 1])
 
