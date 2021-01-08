@@ -124,26 +124,26 @@ def main(args):
     detector.summary()
     backbone.summary()
 
+    # if args.frozen_weights is not None:
+    #    backbone = backbone.load(args.frozen_weights, map_location='cpu')
+
+    total_batch_size = args.batch_size * strategy.num_replicas_in_sync
     dataset_train = build_dataset(image_set='train', args=args, seed=seed)
     dataset_val = build_dataset(image_set='validation', args=args, seed=seed)
 
-    data_loader_train = dataset_train.dataset(batch_size=args.batch_size * strategy.num_replicas_in_sync,
-                                              num_workers=args.num_workers)
-    data_loader_val = dataset_val.dataset(batch_size=args.batch_size * strategy.num_replicas_in_sync,
-                                          num_workers=args.num_workers)
+    data_loader_train = dataset_train.dataset(batch_size=total_batch_size, num_workers=args.num_workers)
+    data_loader_val = dataset_val.dataset(batch_size=total_batch_size, num_workers=args.num_workers)
     data_iter_train = iter(strategy.experimental_distribute_dataset(data_loader_train))
     data_iter_val = iter(strategy.experimental_distribute_dataset(data_loader_val))
-    num_steps_per_epoch = len(data_iter_train)
 
-    backbone_scheduler = tf.keras.optimizers.schedules.ExponentialDecay(args.lr_backbone, args.lr_drop * num_steps_per_epoch, 0.1, staircase=True)
-    detector_scheduler = tf.keras.optimizers.schedules.ExponentialDecay(args.lr, args.lr_drop * num_steps_per_epoch, 0.1, staircase=True)
-    backbone_optimizer = tfa.optimizers.AdamW(learning_rate=backbone_scheduler, weight_decay=args.weight_decay)
-    detector_optimizer = tfa.optimizers.AdamW(learning_rate=detector_scheduler, weight_decay=args.weight_decay)
-    optimizer = (backbone_optimizer, detector_optimizer)
+    NUM_TRAIN_EXS = 118287
+    steps_per_drop = args.lr_drop * (NUM_TRAIN_EXS // total_batch_size)
+    b_sched = tf.keras.optimizers.schedules.ExponentialDecay(args.lr_backbone, steps_per_drop, 0.1, staircase=True)
+    d_sched = tf.keras.optimizers.schedules.ExponentialDecay(args.lr, steps_per_drop, 0.1, staircase=True)
+    b_opt = tfa.optimizers.AdamW(learning_rate=b_sched, weight_decay=args.weight_decay)
+    d_opt = tfa.optimizers.AdamW(learning_rate=d_sched, weight_decay=args.weight_decay)
+    optimizer = (b_opt, d_opt)
     model = (backbone, detector)
-
-    # if args.frozen_weights is not None:
-    #    checkpoint = torch.load(args.frozen_weights, map_location='cpu')
 
     output_dir = Path(args.output_dir)
     if args.resume:
@@ -161,7 +161,7 @@ def main(args):
 
     if args.eval:
         test_stats, _ = evaluate(model, criterion, postprocessors,
-                                              data_iter_val, strategy, args.output_dir)
+                                 data_iter_val, strategy, args.output_dir)
         return
 
     print("Start training")

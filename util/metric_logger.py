@@ -96,7 +96,8 @@ class MetricLogger(object):
         self.meters[name] = meter
 
     def log_every(self, iterable, print_freq, header=None):
-        i, l = 0, len(iterable)
+        # Hack, find way to extract lenth of data iterator layer
+        i, l = 0, 118287
         if not header:
             header = ''
         start_time = time.time()
