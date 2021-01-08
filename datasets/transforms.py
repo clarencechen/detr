@@ -18,24 +18,25 @@ def crop(img, tgt, region):
     i, j, h, w = region
     new_img = tf.image.crop_to_bounding_box(img, i, j, h, w)
 
-    if "boxes" in tgt:
+    if 'boxes' in tgt:
         max_size = tf.cast(tf.tile(tf.shape(img)[-3:-1], [2]), tf.float32)
-        new_boxes = tgt["boxes"] * max_size - tf.cast(tf.stack([i, j, i, j]), tf.float32)
+        new_boxes = tgt['boxes'] * max_size - tf.cast(tf.stack([i, j, i, j]), tf.float32)
         new_boxes = new_boxes / tf.cast(tf.stack([h, w, h, w]), tf.float32)
-        updates["boxes"] = tf.clip_by_value(new_boxes, 0, 1)
+        updates['boxes'] = tf.clip_by_value(new_boxes, 0, 1)
 
     if "masks" in tgt:
         new_masks = tf.image.crop_to_bounding_box(tgt['masks'], i, j, h, w)
         updates['masks'] = new_masks
 
-    if "area" in tgt and ("boxes" in tgt or "masks" in tgt):
+    if "area" in tgt and ('boxes' in tgt or "masks" in tgt):
         # favor masks selection when recalculating area
         # this is compatible with semantics in original coco dataset
         # this is also more accurate, especially for panoptic segmentation
         if "masks" in tgt:
-            updates["area"] = tf.reduce_sum(tf.cast(tgt['masks'], tf.int32), [-3, -2])
+            updates["area"] = tf.reduce_sum(tf.cast(updates['masks'], tf.int32), [-3, -2])
         else:
-            updates["area"] = tf.cast(box_area_xyxy(new_boxes), tf.int32)
+            box_norm_factor = tf.cast(h * w, tf.float32)
+            updates["area"] = tf.cast(box_area_xyxy(updates['boxes']) * box_norm_factor, tf.int32)
 
     return new_img, shallow_update_dict(tgt, updates)
 
