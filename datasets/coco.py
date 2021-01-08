@@ -78,7 +78,8 @@ class CocoDataset:
             targets['masks'] = tf.cast(seg_id_map == seg_id_list, tf.int32)
         if targets['boxes'].dtype == tf.int32:
             h, w = targets['orig_size'][0], targets['orig_size'][1]
-            box_offset = tf.stack([0, 0, targets['boxes'][..., 0], targets['boxes'][..., 1]], -1)
+            boxes_left_top = targets['boxes'][..., 0:2]
+            box_offset = tf.concat([tf.zeros_like(boxes_left_top), boxes_left_top], -1)
             adj_boxes = tf.cast(targets['boxes'] + box_offset, tf.float32) / tf.cast(tf.stack([w, h, w, h]), tf.float32)
             targets['boxes'] = box_swap_xy(adj_boxes)
         return img, targets
