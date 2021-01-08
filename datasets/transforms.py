@@ -169,8 +169,8 @@ class RandomPartialCropResize(RandomCropExtd):
     def run_transform(self, img, tgt, training):
         idx = self.rng.uniform([1], 0, self.max_idx, dtype=tf.int32)
         scale = tf.gather(self.scales, idx, axis=0)[0]
-        crop_img, crop_tgt = super().call(img, tgt, training)
-        return resize(crop_img, crop_tgt, scale, None)
+        resize_img, resize_tgt = resize(img, tgt, scale, None)
+        return super().call(resize_img, resize_tgt, training)
 
 
     def call(self, img, tgt, training):
