@@ -50,6 +50,7 @@ class CocoDataset:
 
     def format_box_masks(self, img, tgt):
         updates = {}
+        updates['size'] = tf.shape(img)[-3:-1]
         if 'masks' in tgt:
             masks_bnhw = tf.transpose(tgt['masks'], [0, 3, 1, 2])
             updates['masks'] = masks_bnhw
@@ -57,7 +58,7 @@ class CocoDataset:
             boxes_cycxhw = box_xyxy_to_cxcywh(tgt['boxes'])
             updates['boxes'] = box_swap_xy(boxes_cycxhw)
 
-        img_pad_mask = tf.ones(tf.shape(img)[-3:-1], dtype=tf.int32)
+        img_pad_mask = tf.ones(updates['size'], dtype=tf.int32)
         return img, img_pad_mask, shallow_update_dict(tgt, updates)
 
 
@@ -134,7 +135,7 @@ class CocoDataset:
         ds = ds.map(self.format_box_masks, num_parallel_calls=num_workers)
 
         tgt_padded_shape_dict = {
-            'image_id': [2],
+            'image_id': [],
             'area': [self.num_queries],
             'boxes': [self.num_queries, 4],
             'labels': [self.num_queries],
