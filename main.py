@@ -1,10 +1,5 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
-import argparse
-import datetime
-import json
-import random
-import time
-from pathlib import Path
+import argparse, time, datetime, os, json
 
 import numpy as np
 import tensorflow as tf
@@ -145,7 +140,6 @@ def main(args):
     optimizer = (b_opt, d_opt)
     model = (backbone, detector)
 
-    output_dir = Path(args.output_dir)
     if args.resume:
         if args.resume.startswith('https'):
             raise NotImplementedError('Loading hub checkpoints is not supported yet.')
@@ -167,17 +161,24 @@ def main(args):
     print("Start training")
     start_time = time.time()
     if args.output_dir:
+        checkpoint_path = os.path.join(args.output_dir, 'checkpoint')
         save_checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
-        save_manager = tf.train.CheckpointManager(save_checkpoint, output_dir / 'checkpoint', max_to_keep=1)
+        save_manager = tf.train.CheckpointManager(save_checkpoint, checkpoint_path, max_to_keep=1)
+
+        tensorboard_path = os.path.join(args.output_dir, 'tensorboard')
+        summary_writer = tf.summary.create_file_writer(tensorboard_path)
+    else:
+        summary_writer = None
+
     for epoch in range(args.start_epoch, args.epochs):
         train_stats = train_one_epoch(
             model, criterion, data_iter_train, optimizer, strategy, epoch,
-            args.clip_max_norm)
+            summary_writer, args.clip_max_norm)
         if args.output_dir:
             save_manager.save(checkpoint_number=epoch + 1)
             # extra checkpoint before LR drop and every 100 epochs
             if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % 100 == 0:
-                save_checkpoint.save(output_dir / f'checkpoint-{epoch:04}')
+                save_checkpoint.save(checkpoint_path + f'-{epoch:04}')
 
         test_stats, coco_evaluator = evaluate(
             model, criterion, postprocessors, data_iter_val, args.output_dir
@@ -188,19 +189,22 @@ def main(args):
                      'epoch': epoch}
 
         if args.output_dir:
-            with tf.io.gfile.GFile(output_dir / "log.txt", mode="a") as f:
+            log_path = os.path.join(args.output_di, 'log.txt')
+            with tf.io.gfile.GFile(log_path, mode='a') as f:
                 f.write(json.dumps(log_stats) + "\n")
 
             # for evaluation logs
             if coco_evaluator is not None:
-                (output_dir / 'eval').mkdir(exist_ok=True)
+                eval_path = os.path.join(args.output_di, 'eval')
+                if not tf.io.gfile.exists(eval_path):
+                    tf.io.gfile.mkdir(eval_path)
                 if "bbox" in coco_evaluator.coco_eval:
                     filenames = ['latest.pth']
                     if epoch % 50 == 0:
                         filenames.append(f'{epoch:03}.pth')
                     for name in filenames:
                         torch.save(coco_evaluator.coco_eval["bbox"].eval,
-                                   output_dir / "eval" / name)
+                                   eval_path / name)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -210,6 +214,6 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DETR training and evaluation script', parents=[get_args_parser()])
     args = parser.parse_args()
-    if args.output_dir:
-        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    if args.output_dir and not tf.io.gfile.exists(args.output_dir):
+        tf.io.gfile.makedirs(args.output_dir)
     main(args)

@@ -2,10 +2,8 @@
 """
 Train and eval functions used in main.py
 """
-import math
-import os
-import sys
-from typing import Tuple, Iterable
+import math, os, sys
+from typing import Tuple, Iterable, Optional
 
 import tensorflow as tf
 
@@ -17,13 +15,14 @@ from util.metric_logger import MetricLogger, SmoothedValue
 
 def train_one_epoch(model: Tuple[tf.keras.Model], criterion: tf.keras.Model,
                     data_iter: Iterable, optimizer: Tuple[tf.keras.optimizers.Optimizer],
-                    strategy: tf.distribute.Strategy, epoch: int, max_norm: float = 0):
+                    strategy: tf.distribute.Strategy, epoch: int,
+                    summary_writer: Optional[tf.summary.SummaryWriter] = None, max_norm: float = 0):
     backbone, detector = model
     b_optimizer, d_optimizer = optimizer
     metric_logger = MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', SmoothedValue(window_size=1, fmt='{value:.6f}'))
     metric_logger.add_meter('class_error', SmoothedValue(window_size=1, fmt='{value:.2f}'))
-    train_summary_writer = tf.summary.create_file_writer()
+    
     print_freq = 10
 
     @tf.function
@@ -54,8 +53,8 @@ def train_one_epoch(model: Tuple[tf.keras.Model], criterion: tf.keras.Model,
             sys.exit(1)
 
         step = d_optimizer.iterations
-        if step % print_freq == 0:
-            with train_summary_writer.as_default():
+        if summary_writer is not None and (step % print_freq == 0):
+            with summary_writer.as_default():
                 tf.summary.scalar('train/lr', d_optimizer.lr(step), step=step)
                 for (k, v), (k_u, v_u) in zip(ldict_reduced_scld.items(), ldict_reduced_raw.items()):
                     tf.summary.scalar(f'train/losses/scaled/{k}', v, step=step)
