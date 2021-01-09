@@ -26,9 +26,9 @@ def train_one_epoch(model: Tuple[tf.keras.Model], criterion: tf.keras.Model,
     print_freq = 10
 
     @tf.function
-    def train_step(inputs, masks, targets, weight_dict={}):
+    def train_step(inputs, masks, targets, *, weight_dict={}):
         with tf.GradientTape() as tape:
-            loss_dict = criterion(detector(backbone(inputs, masks)), targets)
+            loss_dict = criterion(detector(backbone([inputs, masks])), targets)
             total_loss = tf.reduce_sum([loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict])
 
         b_vars, d_vars = backbone.trainable_variables, detector.trainable_variables

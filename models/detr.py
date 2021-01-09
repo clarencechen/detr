@@ -19,7 +19,7 @@ from .transformer import build_transformer
 
 class DETR():
     """ This is the DETR module that performs object detection """
-    def __init__(self, backbone, transformer, num_classes, num_queries, training, aux_loss=False, panoptic_seg_head=False, freeze_detr=False):
+    def __init__(self, backbone, transformer, batch_size, num_classes, num_queries, training, aux_loss=False, panoptic_seg_head=False, freeze_detr=False):
         """ Initializes the model.
         Parameters:
             transformer: keras functional layer graph of the transformer architecture. See transformer.py
@@ -34,7 +34,7 @@ class DETR():
         hidden_dim = transformer.d_model
         self.class_embed = layers.Dense(num_classes + 1)
         self.bbox_embed = Sequential([layers.Dense(hidden_dim, activation='relu')] * 2 + [layers.Dense(4, activation='sigmoid')])
-        self.query_embed = layers.Embedding(num_queries, hidden_dim)(tf.expand_dims(tf.range(num_queries, dtype=tf.int32), 0))
+        self.query_embed = layers.Embedding(num_queries, hidden_dim)(tf.stack([tf.range(num_queries, dtype=tf.int32)] * batch_size, 0))
         self.input_proj = layers.Conv2D(hidden_dim, kernel_size=1)
         self.input_reshape, self.pos_reshape = layers.Reshape((-1, hidden_dim)), layers.Reshape((-1, hidden_dim))
         self.mask_reshape = layers.Reshape((-1,))
@@ -91,7 +91,7 @@ class DETR():
                 for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
 
 
-class SetCriterion:
+class SetCriterion(layers.Layer):
     """ This class computes the loss for DETR.
     The process happens in two steps:
         1) we compute hungarian assignment between ground truth boxes and the outputs of the model
@@ -111,7 +111,7 @@ class SetCriterion:
         self.matcher = matcher
         self.weight_dict = weight_dict
         self.eos_coef = eos_coef
-        self.losses = losses
+        self.loss_list = losses
 
     @tf.function
     def loss_labels(self, outputs, targets, indices, num_boxes):
@@ -264,7 +264,7 @@ class SetCriterion:
 
         # Compute all the requested losses
         losses = {}
-        for loss in self.losses:
+        for loss in self.loss_list:
             losses.update(self.get_loss(loss, outputs, matched_targets, indices, tgt_lengths, num_boxes))
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
@@ -272,7 +272,7 @@ class SetCriterion:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
                 aux_indices = self.matcher(aux_outputs, valid_targets, tgt_lengths)
                 aux_targets = {k: _get_tgt_permutation(v, indices, tgt_lengths) for k, v in valid_targets.items() if k != 'area'}
-                for loss in self.losses:
+                for loss in self.loss_list:
                     if loss == 'masks':
                         # Intermediate masks losses are too costly to compute, we ignore them.
                         continue
@@ -326,6 +326,7 @@ def build(args, strategy):
 
         detector = DETR(backbone,
             build_transformer(args),
+            batch_size=args.batch_size,
             num_classes=num_classes,
             num_queries=args.num_queries,
             aux_loss=args.aux_loss,
