@@ -106,6 +106,8 @@ def find_strategy_single_worker(args):
             strategy = tf.distribute.MirroredStrategy(devices=gpu_name_list[:min(args.num_gpus, len(gpus))])
         else:
             strategy = tf.distribute.get_strategy()
+    else:
+        strategy = tf.distribute.get_strategy()
     return strategy
 
 
