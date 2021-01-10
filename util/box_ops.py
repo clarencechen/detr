@@ -57,7 +57,7 @@ def generalized_box_iou(x1, x2):
     # so do an early check
     x1_ok = tf.debugging.assert_greater_equal(x1[:, 2:], x1[:, :2])
     x2_ok = tf.debugging.assert_greater_equal(x2[:, 2:], x2[:, :2])
-    with tf.Graph.control_dependencies([x1_ok, x2_ok]):
+    with tf.control_dependencies([x1_ok, x2_ok]):
         iou, union = box_iou(x1, x2)
 
         lt = tf.minimum(tf.expand_dims(x1[:, :2], -2), x2[:, :2])
