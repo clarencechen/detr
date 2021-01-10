@@ -51,7 +51,8 @@ class HungarianMatcher:
             For each batch element, it holds:
                 len(index_i) = len(index_j) = min(num_queries, lengths[n])
         """
-        bs, num_queries = tf.shape(outputs["pred_logits"])[:2]
+        out_shape = tf.shape(outputs["pred_logits"])
+        bs, num_queries = out_shape[0], out_shape[1]
 
         # We flatten to compute the cost matrices in a batch
         out_prob = tf.nn.softmax(tf.reshape(outputs["pred_logits"], [bs * num_queries, -1]), axis=-1)  # [batch_size * num_queries, num_classes]
@@ -70,7 +71,7 @@ class HungarianMatcher:
 
         # Final cost matrix with shape [batch_size * num_queries, num_valid_targets]
         C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
-        C = tf.reshape(bs, num_queries, -1)
+        C = tf.reshape(C, [bs, num_queries, -1])
 
         indices = [linear_sum_assignment(c[i]) for i, c in enumerate(tf.split(C, lengths, axis=-1))]
 
