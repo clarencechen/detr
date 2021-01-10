@@ -113,6 +113,16 @@ class SetCriterion(layers.Layer):
         self.eos_coef = eos_coef
         self.loss_list = losses
 
+        self.key_list = []
+        for loss in losses:
+            if loss == 'cardinality':
+                pass
+            elif loss == 'class_error':
+                if 'labels' not in self.key_list:
+                    self.key_list += ['labels']
+            else:
+                self.key_list += [loss]
+
     @tf.function
     def loss_labels(self, outputs, targets, indices, num_boxes):
         """Classification loss (NLL)
@@ -247,14 +257,14 @@ class SetCriterion(layers.Layer):
 
         # Gather valid targets from padded batch
         valid_entries = tf.where(targets['area'] > 0)
-        valid_targets = {k: tf.gather_nd(v, valid_entries) for k, v in targets.items() if k != 'area'}
+        valid_targets = {k: tf.gather_nd(targets[k], valid_entries) for k in self.key_list}
         tgt_lengths = tf.reduce_sum(tf.cast(targets['area'] > 0, tf.int32), axis=-1)
 
         # Retrieve the matching between the outputs of the last layer and the targets
         indices = self.matcher(outputs_without_aux, valid_targets, tgt_lengths)
 
         # Gather the targets matched with the outputs of the last layer
-        matched_targets = {k: _get_tgt_permutation(v, indices, tgt_lengths) for k, v in valid_targets.items() if k != 'area'}
+        matched_targets = {k: _get_tgt_permutation(targets[k], indices, tgt_lengths) for k in self.key_list}
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_boxes = tf.cast(tf.reduce_sum(tgt_lengths), dtype=tf.float32)
@@ -271,7 +281,7 @@ class SetCriterion(layers.Layer):
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
                 aux_indices = self.matcher(aux_outputs, valid_targets, tgt_lengths)
-                aux_targets = {k: _get_tgt_permutation(v, indices, tgt_lengths) for k, v in valid_targets.items() if k != 'area'}
+                aux_targets = {k: _get_tgt_permutation(targets[k], indices, tgt_lengths) for k in self.key_list}
                 for loss in self.loss_list:
                     if loss == 'masks':
                         # Intermediate masks losses are too costly to compute, we ignore them.
