@@ -56,7 +56,10 @@ def resize(img, tgt, min_size, max_size=None):
         updates['masks'] = new_masks
 
     if "area" in tgt:
-        new_area = (tgt["area"] * tf.reduce_prod(new_shape)) / tf.reduce_prod(old_shape)
+        new_scale = tf.cast(tf.reduce_prod(tf.shape(new_img)[-3:-1]), tf.int64)
+        old_area = tf.cast(tgt["area"], tf.int64)
+
+        new_area = (old_area * new_scale) / tf.cast(tf.reduce_prod(old_shape), tf.int64)
         updates["area"] = tf.cast(new_area, tf.int32)
 
     return new_img, shallow_update_dict(tgt, updates)
