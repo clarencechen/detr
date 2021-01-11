@@ -134,7 +134,7 @@ class SetCriterion(layers.Layer):
         target_classes_o = targets["labels"]
 
         target_classes = tf.fill(src_logits.shape[:2], self.num_classes, dtype=tf.int64)
-        target_classes = _fill_src_permutation(target_classes, indices, target_classes_o)
+        target_classes = self._fill_src_permutation(target_classes, indices, target_classes_o)
 
         loss_ce = losses.sparse_categorical_crossentropy(src_logits, target_classes)
         sample_weight = tf.where(target_classes == self.num_classes, self.eos_coef, 1)
@@ -152,7 +152,7 @@ class SetCriterion(layers.Layer):
         if not log:
             return {}
 
-        permuted_logits = _get_src_permutation(outputs['pred_logits'], indices)
+        permuted_logits = self._get_src_permutation(outputs['pred_logits'], indices)
         target_classes_o = targets['labels']
 
         losses = {'class_error': tf.nn.compute_average_loss(100 - accuracy(permuted_logits, target_classes_o)[0])}
@@ -178,7 +178,7 @@ class SetCriterion(layers.Layer):
         """
         assert 'pred_boxes' in outputs
 
-        src_boxes = _get_src_permutation(outputs['pred_boxes'], indices)
+        src_boxes = self._get_src_permutation(outputs['pred_boxes'], indices)
         target_boxes = targets['boxes']
 
         loss_bbox = tf.reduce_mean(tf.abs(src_boxes -target_boxes), axis=-1)
@@ -199,37 +199,37 @@ class SetCriterion(layers.Layer):
         """
         assert "pred_masks" in outputs
 
-        src_masks = _get_src_permutation(outputs['pred_masks'], indices)
+        src_masks = self._get_src_permutation(outputs['pred_masks'], indices)
         # TODO use valid to mask invalid areas due to padding in loss
         # target_masks, valid = nested_tensor_from_tensor_list(masks).decompose()
         target_masks = targets['masks']
 
         # upsample predictions to the target size
         src_masks = tf.image.resize(tf.expand_dims(src_masks, -1), size=target_masks.shape[1:3])[..., 0]
-        src_masks, target_masks = _flatten_mask(src_masks), _flatten_mask(target_masks)
+        src_masks, target_masks = self._flatten_mask(src_masks), self._flatten_mask(target_masks)
 
         losses = {
             "loss_mask": tf.nn.compute_average_loss(sigmoid_focal_loss(src_masks, target_masks, num_boxes)),
             "loss_dice": tf.nn.compute_average_loss(dice_loss(src_masks, target_masks, num_boxes)),
         }
         return losses
-
+    @staticmethod
     @tf.function
     def _flatten_mask(x: tf.Tensor):
         return tf.reshape(x, [tf.shape(x)[0], -1])
-
+    @staticmethod
     @tf.function
-    def _get_tgt_permutation(targets: tf.Tensor, indices: List[tf.Tensor], lengths: tf.Tensor):
+    def _get_tgt_permutation(targets: tf.Tensor, indices: List[List[tf.Tensor]], lengths: tf.Tensor):
         # retrieve permutation of each target tensor of shape [num__valid_targets, ...] in batch following indices
         return tf.concat([tf.gather(tgt, idx, axis=0) for tgt, (_, idx) in zip(tf.split(targets, lengths, axis=0), indices)], axis=0)
-
+    @staticmethod
     @tf.function
-    def _get_src_permutation(outputs: tf.Tensor, indices: List[tf.Tensor]):
+    def _get_src_permutation(outputs: tf.Tensor, indices: List[List[tf.Tensor]]):
         # retrieve permutation of each output tensor of shape [batch_size, num_queries, ...] in batch following indices
         return tf.concat([tf.gather(outputs[i, ...], src, axis=0) for i, (src, _) in enumerate(indices)], axis=0)
-
+    @staticmethod
     @tf.function
-    def _fill_src_permutation(template: tf.Tensor, indices: List[tf.Tensor], outputs: tf.Tensor):
+    def _fill_src_permutation(template: tf.Tensor, indices: List[List[tf.Tensor]], outputs: tf.Tensor):
         batch_query_idx = tf.concat([tf.stack([i * tf.ones_like(src, dtype=tf.int64), src], axis=1) for i, (src, _) in enumerate(indices)], axis=0)
         return tf.tensor_scatter_nd_update(template, batch_query_idx, outputs)
 
@@ -264,7 +264,7 @@ class SetCriterion(layers.Layer):
         indices = self.matcher(outputs_without_aux, valid_targets, tgt_lengths)
 
         # Gather the targets matched with the outputs of the last layer
-        matched_targets = {k: _get_tgt_permutation(targets[k], indices, tgt_lengths) for k in self.key_list}
+        matched_targets = {k: self._get_tgt_permutation(targets[k], indices, tgt_lengths) for k in self.key_list}
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_boxes = tf.cast(tf.reduce_sum(tgt_lengths), dtype=tf.float32)
@@ -281,7 +281,7 @@ class SetCriterion(layers.Layer):
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
                 aux_indices = self.matcher(aux_outputs, valid_targets, tgt_lengths)
-                aux_targets = {k: _get_tgt_permutation(targets[k], indices, tgt_lengths) for k in self.key_list}
+                aux_targets = {k: self._get_tgt_permutation(targets[k], indices, tgt_lengths) for k in self.key_list}
                 for loss in self.loss_list:
                     if loss == 'masks':
                         # Intermediate masks losses are too costly to compute, we ignore them.

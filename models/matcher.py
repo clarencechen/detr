@@ -45,7 +45,7 @@ class HungarianMatcher:
                  "boxes": Tensor of dim [num_valid_targets, 4] containing the target box coordinates
 
         Returns:
-            A list of size batch_size, containing tuples of (index_i, index_j) where:
+            A list of size batch_size, containing lists of (index_i, index_j) where:
                 - index_i is the indices of the selected predictions (in order)
                 - index_j is the indices of the corresponding selected targets (in order)
             For each batch element, it holds:
@@ -73,9 +73,10 @@ class HungarianMatcher:
         C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
         C = tf.reshape(C, [bs, num_queries, -1])
 
-        indices = [linear_sum_assignment(c[i]) for i, c in enumerate(tf.split(C, lengths, axis=-1))]
+        with tf.device('/CPU:0'):
+            indices = [tf.numpy_function(linear_sum_assignment, [c[i]], [tf.int32, tf.int32]) for i, c in enumerate(tf.split(C, lengths, axis=-1))]
 
-        return [(tf.constant(i, dtype=tf.int32), tf.constant(j, dtype=tf.int32)) for i, j in indices]
+        return indices
 
 
 def build_matcher(args):
