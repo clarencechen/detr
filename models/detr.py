@@ -124,7 +124,7 @@ class SetCriterion(layers.Layer):
                 self.key_list += [loss]
 
     @tf.function
-    def loss_labels(self, outputs, targets, indices, num_boxes):
+    def loss_labels(self, outputs, targets, indices, num_boxes, **kwargs):
         """Classification loss (NLL)
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
         """
@@ -133,18 +133,17 @@ class SetCriterion(layers.Layer):
         src_logits = outputs["pred_logits"]
         target_classes_o = targets["labels"]
 
-        target_classes = tf.fill(src_logits.shape[:2], self.num_classes, dtype=tf.int64)
+        target_classes = tf.fill(src_logits.shape[:2], self.num_classes)
         target_classes = self._fill_src_permutation(target_classes, indices, target_classes_o)
 
-        loss_ce = losses.sparse_categorical_crossentropy(src_logits, target_classes)
+        loss_ce = losses.sparse_categorical_crossentropy(target_classes, src_logits, from_logits=True)
         sample_weight = tf.where(target_classes == self.num_classes, self.eos_coef, 1)
-        loss_ce = tf.nn.compute_average_loss(loss_ce, sample_weight=sample_weight)
-        losses = {'loss_ce': loss_ce}
 
-        return losses
+        loss_dict = {'loss_ce': tf.nn.compute_average_loss(loss_ce, sample_weight=sample_weight)}
+        return loss_dict
 
     @tf.function
-    def loss_class_error(self, outputs, targets, indices, num_boxes, log=True):
+    def loss_class_error(self, outputs, targets, indices, num_boxes, log=True, **kwargs):
         """TargetbBox classification error
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
         """
@@ -155,23 +154,23 @@ class SetCriterion(layers.Layer):
         permuted_logits = self._get_src_permutation(outputs['pred_logits'], indices)
         target_classes_o = targets['labels']
 
-        losses = {'class_error': tf.nn.compute_average_loss(100 - accuracy(permuted_logits, target_classes_o)[0])}
-        return losses
+        loss_dict = {'class_error': tf.nn.compute_average_loss(100 - accuracy(permuted_logits, target_classes_o)[0])}
+        return loss_dict
 
     @tf.function
-    def loss_cardinality(self, outputs, targets, indices, num_boxes, lengths=None):
+    def loss_cardinality(self, outputs, targets, indices, num_boxes, lengths=None, **kwargs):
         """ Compute the cardinality error, ie the absolute error in the number of predicted non-empty boxes
         This is not really a loss, it is intended for logging purposes only. It doesn't propagate gradients
         """
         pred_logits = outputs['pred_logits']
         # Count the number of predictions that are NOT "no-object" (which is the last class)
-        card_pred = tf.reduce_sum((tf.argmax(pred_logits, axis=-1) != self.num_classes), axis=-1)
+        card_pred = tf.math.count_nonzero((tf.argmax(pred_logits, axis=-1) != self.num_classes), axis=-1)
         card_err = tf.abs(card_pred - lengths)
-        losses = {'cardinality_error': tf.nn.compute_average_loss(card_err)}
-        return losses
+        loss_dict = {'cardinality_error': tf.nn.compute_average_loss(card_err)}
+        return loss_dict
 
     @tf.function
-    def loss_boxes(self, outputs, targets, indices, num_boxes):
+    def loss_boxes(self, outputs, targets, indices, num_boxes, **kwargs):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
            targets dicts must contain the key "bbox" containing a tensor of dim [nb_target_boxes, 4]
            The target boxes are expected in format (center_x, center_y, w, h), normalized by the image size.
@@ -182,18 +181,18 @@ class SetCriterion(layers.Layer):
         target_boxes = targets['boxes']
 
         loss_bbox = tf.reduce_mean(tf.abs(src_boxes -target_boxes), axis=-1)
-
-        losses = {}
-        losses['loss_bbox'] = tf.nn.compute_average_loss(loss_bbox) / num_boxes
-
         loss_giou = 1 - tf.linalg.diag_part(box_ops.generalized_box_iou(
             box_ops.box_cxcywh_to_xyxy(src_boxes),
             box_ops.box_cxcywh_to_xyxy(target_boxes)))
-        losses['loss_giou'] = tf.nn.compute_average_loss(loss_giou) / num_boxes
-        return losses
+
+        loss_dict = {
+            'loss_bbox': tf.nn.compute_average_loss(loss_bbox) / num_boxes,
+            'loss_giou': tf.nn.compute_average_loss(loss_giou) / num_boxes
+        }
+        return loss_dict
 
     @tf.function
-    def loss_masks(self, outputs, targets, indices, num_boxes):
+    def loss_masks(self, outputs, targets, indices, num_boxes, **kwargs):
         """Compute the losses related to the masks: the focal loss and the dice loss.
            targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
         """
@@ -208,11 +207,11 @@ class SetCriterion(layers.Layer):
         src_masks = tf.image.resize(tf.expand_dims(src_masks, -1), size=target_masks.shape[1:3])[..., 0]
         src_masks, target_masks = self._flatten_mask(src_masks), self._flatten_mask(target_masks)
 
-        losses = {
-            "loss_mask": tf.nn.compute_average_loss(sigmoid_focal_loss(src_masks, target_masks, num_boxes)),
-            "loss_dice": tf.nn.compute_average_loss(dice_loss(src_masks, target_masks, num_boxes)),
+        loss_dict = {
+            'loss_mask': tf.nn.compute_average_loss(sigmoid_focal_loss(src_masks, target_masks, num_boxes)),
+            'loss_dice': tf.nn.compute_average_loss(dice_loss(src_masks, target_masks, num_boxes))
         }
-        return losses
+        return loss_dict
     @staticmethod
     @tf.function
     def _flatten_mask(x: tf.Tensor):
@@ -230,7 +229,7 @@ class SetCriterion(layers.Layer):
     @staticmethod
     @tf.function
     def _fill_src_permutation(template: tf.Tensor, indices: List[List[tf.Tensor]], outputs: tf.Tensor):
-        batch_query_idx = tf.concat([tf.stack([i * tf.ones_like(src, dtype=tf.int64), src], axis=1) for i, (src, _) in enumerate(indices)], axis=0)
+        batch_query_idx = tf.concat([tf.stack([i * tf.ones_like(src), src], axis=1) for i, (src, _) in enumerate(indices)], axis=0)
         return tf.tensor_scatter_nd_update(template, batch_query_idx, outputs)
 
     @tf.function
@@ -258,7 +257,7 @@ class SetCriterion(layers.Layer):
         # Gather valid targets from padded batch
         valid_entries = tf.where(targets['area'] > 0)
         valid_targets = {k: tf.gather_nd(targets[k], valid_entries) for k in self.key_list}
-        tgt_lengths = tf.reduce_sum(tf.cast(targets['area'] > 0, tf.int32), axis=-1)
+        tgt_lengths = tf.math.count_nonzero(targets['area'] > 0, axis=-1)
 
         # Retrieve the matching between the outputs of the last layer and the targets
         indices = self.matcher(outputs_without_aux, valid_targets, tgt_lengths)
@@ -267,15 +266,15 @@ class SetCriterion(layers.Layer):
         matched_targets = {k: self._get_tgt_permutation(targets[k], indices, tgt_lengths) for k in self.key_list}
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
-        num_boxes = tf.cast(tf.reduce_sum(tgt_lengths), dtype=tf.float32)
+        num_boxes = tf.cast(tf.reduce_sum(tgt_lengths), tf.float32)
         ctx = tf.distribute.get_replica_context()
         if ctx is not None:
-            num_boxes = tf.maximum(1, ctx.all_reduce("MEAN", num_boxes, axis=None))
+            num_boxes = tf.maximum(1.0, ctx.all_reduce("MEAN", num_boxes))
 
         # Compute all the requested losses
-        losses = {}
+        loss_dict = {}
         for loss in self.loss_list:
-            losses.update(self.get_loss(loss, outputs, matched_targets, indices, tgt_lengths, num_boxes))
+            loss_dict.update(self.get_loss(loss, outputs, matched_targets, indices, num_boxes, lengths=tgt_lengths))
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if 'aux_outputs' in outputs:
@@ -286,15 +285,15 @@ class SetCriterion(layers.Layer):
                     if loss == 'masks':
                         # Intermediate masks losses are too costly to compute, we ignore them.
                         continue
-                    kwargs = {}
+                    kwargs = {'lengths': tgt_lengths}
                     if loss == 'class_error':
                         # Logging is enabled only for the last layer
                         kwargs = {'log': False}
                     l_dict = self.get_loss(loss, aux_outputs, aux_targets, aux_indices, num_boxes, **kwargs)
                     l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
-                    losses.update(l_dict)
+                    loss_dict.update(l_dict)
 
-        return losses
+        return loss_dict
 
 
 def build(args, strategy):
@@ -312,7 +311,7 @@ def build(args, strategy):
         # max_obj_id + 1, but the exact value doesn't really matter
         num_classes = 250
 
-    weight_dict = {'loss_ce': 1, 'loss_bbox': args.bbox_loss_coef}
+    weight_dict = {'loss_ce': 1.0, 'loss_bbox': args.bbox_loss_coef}
     weight_dict['loss_giou'] = args.giou_loss_coef
     if args.masks:
         weight_dict["loss_mask"] = args.mask_loss_coef
