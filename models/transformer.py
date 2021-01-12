@@ -31,7 +31,7 @@ class FeedForward:
         act1 = self.d1(self.l1(x), training)
         if self.use_glu:
             act3 = self.d3(self.l3(x), training)
-            return self.d2(self.l2(act1 * act3), training)
+            act1 = act1 * act3
         return self.d2(self.l2(act1), training)
 
 
@@ -222,7 +222,7 @@ class TransformerDecoderLayer(TransformerBaseLayer):
         if key_padding_mask is not None:
             key_padding_mask = tf.expand_dims(key_padding_mask, 1)
             if attention_mask is not None:
-                attention_mask = attention_mask & attention_padding_mask
+                attention_mask = attention_mask & key_padding_mask
             else:
                 attention_mask = key_padding_mask
 
