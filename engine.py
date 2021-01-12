@@ -32,7 +32,7 @@ def train_one_epoch(model: Tuple[tf.keras.Model], criterion: tf.keras.Model,
             total_loss = tf.reduce_sum([loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict])
 
         b_vars, d_vars = backbone.trainable_variables, detector.trainable_variables
-        b_grad, d_grad = tape.gradient(total_loss, b_vars), tape.gradient(total_loss, d_vars)
+        b_grad, d_grad = tape.gradient(total_loss, [b_vars, d_vars])
         b_grad = [tf.clip_by_norm(grad, max_norm) for grad in b_grad]
         d_grad = [tf.clip_by_norm(grad, max_norm) for grad in d_grad]
         d_optimizer.apply_gradients(zip(d_grad, d_vars))
