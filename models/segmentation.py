@@ -70,7 +70,7 @@ class MaskHeadSmallConv:
 
 
 @tf.function
-def dice_loss(inputs, targets, num_boxes):
+def dice_loss(inputs, targets):
     """
     Compute the DICE loss, similar to generalized IOU for masks
     Args:
@@ -83,12 +83,11 @@ def dice_loss(inputs, targets, num_boxes):
     inputs = tf.sigmoid(inputs)
     numerator = 2 * tf.reduce_sum(inputs * targets, axis=-1)
     denominator = tf.reduce_sum(inputs, axis=-1) + tf.reduce_sum(targets, axis=-1)
-    loss = 1 - (numerator + 1) / (denominator + 1)
-    return loss / num_boxes
+    return 1 - (numerator + 1) / (denominator + 1)
 
 
 @tf.function
-def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: float = 2):
+def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2):
     """
     Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
     Args:
@@ -113,4 +112,4 @@ def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: f
         alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
         loss = alpha_t * loss
 
-    return tf.reduce_mean(loss, axis=-1) / num_boxes
+    return tf.reduce_mean(loss, axis=-1)

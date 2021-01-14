@@ -31,7 +31,7 @@ class HungarianMatcher:
         assert cost_class != 0 or cost_bbox != 0 or cost_giou != 0, "all costs cant be 0"
 
     @tf.function
-    def __call__(self, outputs, targets, lengths):
+    def __call__(self, outputs, targets):
         """ Performs the matching
 
         Params:
@@ -40,41 +40,41 @@ class HungarianMatcher:
                  "pred_boxes": Tensor of dim [batch_size, num_queries, 4] with the predicted box coordinates
 
             targets: This is a dict of targets containing key-value pairs:
-                 "labels": Tensor of dim [num_valid_targets] (where num_valid_targets is the number of ground-truth
+                 "labels": Tensor of dim [batch_size, num_queries] (where num_queries is the padded length of 
                            objects in the target batch) containing the class labels
-                 "boxes": Tensor of dim [num_valid_targets, 4] containing the target box coordinates
+                 "boxes": Tensor of dim [batch_size, num_queries, 4] containing the target box coordinates
 
         Returns:
-            A list of size batch_size, containing lists of (index_i, index_j) where:
+            A tensor of shape [batch_size, 2, num_queries] containing pairs (index_i, index_j) where:
                 - index_i is the indices of the selected predictions (in order)
                 - index_j is the indices of the corresponding selected targets (in order)
-            For each batch element, it holds:
-                len(index_i) = len(index_j) = min(num_queries, lengths[n])
-        """
+            """
         out_shape = tf.shape(outputs["pred_logits"])
-        bs, num_queries = out_shape[0], out_shape[1]
 
         # We flatten to compute the cost matrices in a batch
-        out_prob = tf.nn.softmax(tf.reshape(outputs["pred_logits"], [bs * num_queries, -1]), axis=-1)  # [batch_size * num_queries, num_classes]
-        out_boxes = tf.reshape(outputs["pred_boxes"], [bs * num_queries, -1])  # [batch_size * num_queries, 4]
+        out_prob = tf.nn.softmax(outputs["pred_logits"], -1)  # [batch_size, num_queries, num_classes]
+        out_boxes = tf.expand_dims(outputs["pred_boxes"], -2)  # [batch_size, num_queries, 1, 4]
+        tgt_boxes = tf.expand_dims(targets["boxes"], -3)  # [batch_size, 1, num_targets, 4]
 
         # Compute the classification cost. Contrary to the loss, we don't use the NLL,
         # but approximate it in 1 - proba[target class].
         # The 1 is a constant that doesn't change the matching, it can be ommitted.
-        cost_class = -tf.gather(out_prob, targets["labels"], axis=1)
+        cost_class = -tf.gather(out_prob, targets["labels"], axis=2, batch_dims=1) # [batch_size, num_queries, num_targets]
 
         # Compute the L1 cost between all pairs of boxes
-        cost_bbox = tf.reduce_mean(tf.abs(tf.expand_dims(out_boxes, -2) - targets["boxes"]), axis=-1)
+        cost_bbox = tf.reduce_mean(tf.abs(out_boxes - tgt_boxes), -1)
 
         # Compute the giou cost betwen all pairs of boxes
-        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_boxes), box_cxcywh_to_xyxy(targets["boxes"]))
+        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(outputs["pred_boxes"]), box_cxcywh_to_xyxy(targets["boxes"]))
 
-        # Final cost matrix with shape [batch_size * num_queries, num_valid_targets]
+        # Final cost matrix with shape [batch_size, num_queries, num_targets]
         C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
-        C = tf.reshape(C, [bs, num_queries, -1])
+        C = tf.where(tf.expand_dims(targets["area"] > 0, -2), C, 1e8)
 
         with tf.device('/CPU:0'):
-            indices = [tf.numpy_function(linear_sum_assignment, [c[i]], [tf.int32, tf.int32]) for i, c in enumerate(tf.split(C, lengths, axis=-1))]
+            indices = tf.stack([tf.stack(
+                        tf.numpy_function(linear_sum_assignment, [c[0]], [tf.int32, tf.int32]),
+                      0) for c in tf.split(C, tf.ones(tf.shape(C)[0], tf.int32), axis=0)], 0)
 
         return indices
 
