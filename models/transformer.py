@@ -38,18 +38,19 @@ class FeedForward:
 class ResidWrapper:
     # Implementation of Residual unit
     def __init__(self, fn_layer: layers.Layer, norm_layer: layers.Layer,
-             use_prenorm: bool = False, gate_residuals: bool = False):
+                 combine_layer: Callable[..., layers.Layer] = layers.Add,
+                 combine_args: dict = {}, use_prenorm: bool = False):
         self.use_prenorm = use_prenorm
-        self.gate_residuals = gate_residuals
+        self.combine_layer = combine_layer(**combine_args)
         self.fn_layer = fn_layer
         self.norm_layer = norm_layer
 
     def __call__(self, x, *args, **kwargs):
         # TODO: Implement scalar-gated residuals (Used in Admin initialization and ReZero)
         if self.use_prenorm:
-            y = x + self.fn_layer(self.norm_layer(x), *args, **kwargs)
+            y = self.combine_layer([x, self.fn_layer(self.norm_layer(x), *args, **kwargs)])
         else:
-            y = self.norm_layer(x + self.fn_layer(x, *args, **kwargs))
+            y = self.norm_layer(self.combine_layer([x, self.fn_layer(x, *args, **kwargs)]))
         return y
 
 
