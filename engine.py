@@ -9,11 +9,12 @@ import tensorflow as tf
 
 import util.misc as utils
 from util.metric_logger import MetricLogger, SmoothedValue
+from models.matcher import hungarian_matcher
 # from datasets.coco_eval import CocoEvaluator
 # from datasets.panoptic_eval import PanopticEvaluator
 
 
-def train_one_epoch(model: Tuple[tf.keras.Model], criterion: tf.keras.Model,
+def train_one_epoch(model: Tuple[tf.keras.Model], cost_calc: tf.keras.Model, criterion: tf.keras.Model,
                     data_iter: Iterable, optimizer: Tuple[tf.keras.optimizers.Optimizer],
                     strategy: tf.distribute.Strategy, epoch: int,
                     summary_writer: Optional[tf.summary.SummaryWriter] = None, max_norm: float = 0):
@@ -28,15 +29,17 @@ def train_one_epoch(model: Tuple[tf.keras.Model], criterion: tf.keras.Model,
     @tf.function
     def train_step(inputs, masks, targets, *, weight_dict={}):
         with tf.GradientTape() as tape1, tf.GradientTape() as tape2:
-            loss_dict = criterion(detector(backbone([inputs, masks])), targets)
+            outputs = detector(backbone([inputs, masks]))
+            indices = hungarian_matcher(cost_calc(outputs, targets))
+            loss_dict = criterion(outputs, indices, targets)
             total_loss = tf.reduce_sum([loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict])
 
         b_vars, d_vars = backbone.trainable_variables, detector.trainable_variables
         b_grad, d_grad = tape1.gradient(total_loss, b_vars), tape2.gradient(total_loss, d_vars)
         b_grad = [tf.clip_by_norm(grad, max_norm) for grad in b_grad]
         d_grad = [tf.clip_by_norm(grad, max_norm) for grad in d_grad]
-        d_optimizer.apply_gradients(zip(d_grad, d_vars))
         b_optimizer.apply_gradients(zip(b_grad, b_vars))
+        d_optimizer.apply_gradients(zip(d_grad, d_vars))
         return loss_dict
 
     for data in metric_logger.log_every(data_iter, print_freq, header=f'Epoch: [{epoch}]'):
@@ -68,7 +71,7 @@ def train_one_epoch(model: Tuple[tf.keras.Model], criterion: tf.keras.Model,
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
-def evaluate(model, criterion, postprocessors, data_iter, strategy, output_dir):
+def evaluate(model, cost_calc, criterion, postprocessors, data_iter, strategy, output_dir):
     backbone, detector = model
     metric_logger = MetricLogger(delimiter="  ")
     metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
@@ -80,8 +83,9 @@ def evaluate(model, criterion, postprocessors, data_iter, strategy, output_dir):
 
     @tf.function
     def eval_step(inputs, masks, targets):
-        outputs = detector(backbone(inputs, masks))
-        loss_dict = criterion(outputs, targets)
+        outputs = detector(backbone([inputs, masks]))
+        indices = hungarian_matcher(cost_calc(outputs, targets))
+        loss_dict = criterion(outputs, indices, targets)
         return outputs, loss_dict
 
     for data in metric_logger.log_every(data_iter, print_freq, header='Test:'):
@@ -89,7 +93,7 @@ def evaluate(model, criterion, postprocessors, data_iter, strategy, output_dir):
 
         # reduce losses over all GPUs for logging purposes
         ldict_reduced, ldict_reduced_raw, ldict_reduced_scld = utils.reduce_dict(strategy, loss_dict, criterion.weight_dict)
-        outputs = utils.gather_dict(strategy, outputs)
+        outputs = tf.nest.map_structure(lambda t: strategy.gather(t, 0), outputs)
         loss_value = tf.reduce_sum(ldict_reduced_scld.values())
 
         step = d_optimizer.iterations

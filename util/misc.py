@@ -32,22 +32,6 @@ def reduce_dict(strategy: tf.distribute.Strategy, input_dict: dict, weight_dict:
     return reduced_dict, dict_reduced_unscaled, dict_reduced_scaled
 
 
-def gather_dict(strategy: tf.distribute.Strategy, input_dict: dict, axis: int = 0):
-    """
-    Args:
-        strategy: strategy object indicating the devices/threads to gather over
-        input_dict: all the values to be gathered
-    Gather the values in the dictionary from all processes across the specified
-    axis so that the output dict has the results concatenated from all process.
-    Returns a dict with the same fields as input_dict, after gathering.
-    """
-    # sort the keys so that they are consistent across processes
-    gather_dict = {}
-    for k in sorted(input_dict.keys()):
-        gather_dict[k] = strategy.gather(input_dict[k], axis)
-    return gather_dict
-
-
 def get_sha():
     cwd = os.path.dirname(os.path.abspath(__file__))
 

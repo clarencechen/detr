@@ -114,7 +114,7 @@ def main(args):
     tf.random.set_seed(seed)
     np.random.seed(seed)
 
-    backbone, detector, criterion, postprocessors = build_model(args, strategy)
+    backbone, detector, cost_calc, criterion, postprocessors = build_model(args, strategy)
 
     detector.summary()
     backbone.summary()
@@ -154,7 +154,7 @@ def main(args):
             raise FileNotFoundError(f'Could not find checkpoint at {args.resume}')
 
     if args.eval:
-        test_stats, _ = evaluate(model, criterion, postprocessors,
+        test_stats, _ = evaluate(model, cost_calc, criterion, postprocessors,
                                  data_iter_val, strategy, args.output_dir)
         return
 
@@ -172,8 +172,8 @@ def main(args):
 
     for epoch in range(args.start_epoch, args.epochs):
         train_stats = train_one_epoch(
-            model, criterion, data_iter_train, optimizer, strategy, epoch,
-            summary_writer, args.clip_max_norm)
+            model, cost_calc, criterion, data_iter_train, optimizer,
+            strategy, epoch, summary_writer, args.clip_max_norm)
         if args.output_dir:
             save_manager.save(checkpoint_number=epoch + 1)
             # extra checkpoint before LR drop and every 100 epochs
@@ -181,7 +181,8 @@ def main(args):
                 save_checkpoint.save(checkpoint_path + f'-{epoch:04}')
 
         test_stats, coco_evaluator = evaluate(
-            model, criterion, postprocessors, data_iter_val, args.output_dir
+            model, cost_calc, criterion, postprocessors,
+            data_iter_val, args.output_dir
         )
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
