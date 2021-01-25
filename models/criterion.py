@@ -245,6 +245,7 @@ class SetCriterion(layers.Layer):
                       The expected keys in each dict depends on the losses applied, see each loss' doc
         """
         # Gather the targets matched with the outputs of the last layer
+        outputs_without_aux = {k: v for k, v in outputs.items() if k not in 'aux_outputs'}
         matched_outputs, matched_targets = self._get_tgt_src_permutation(outputs_without_aux, targets, indices['main_outputs'])
         valid_tgts = tf.where(matched_targets['area'] > 0)
 
