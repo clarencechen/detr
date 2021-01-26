@@ -6,7 +6,7 @@ import tensorflow as tf
 from scipy.optimize import linear_sum_assignment
 
 @tf.function
-def hungarian_matcher(self, costs):
+def hungarian_matcher(costs):
     """ Calculates matching indices using the Hungarian LSAP algorithm for the given collection of cost matrices.
 
     Params:
@@ -17,10 +17,9 @@ def hungarian_matcher(self, costs):
             - index_i is the indices of the selected predictions (in order)
             - index_j is the indices of the corresponding selected targets (in order)
     """
-    costs = tf.nest.map_structure(lambda cost: tf.ensure_shape(cost, self.input_shape), costs)
     with tf.device('/job:localhost/device:CPU:0'):
         indices = tf.nest.map_structure(lambda cost: tf.stack([
                      tf.stack(tf.numpy_function(linear_sum_assignment, [c], [tf.int64, tf.int64]), 0)
                     for c in tf.unstack(cost, axis=0)], 0), costs)
-        indices = tf.nest.map_structure(lambda index: tf.ensure_shape(index, self.output_shape), indices)
+        indices = tf.nest.map_structure(lambda index, cost: tf.ensure_shape(index, [cost.shape[0], 2, cost.shape[1]]), indices)
     return indices

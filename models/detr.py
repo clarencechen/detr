@@ -154,4 +154,4 @@ def build(args, strategy):
         else:
             postprocessors['iou_types'] = tuple('bbox')
 
-    return backbone, detector, cost_calc, matcher, criterion, postprocessors
+    return backbone, detector, cost_calc, criterion, postprocessors
